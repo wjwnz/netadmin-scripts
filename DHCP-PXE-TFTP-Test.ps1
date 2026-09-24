@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.5.0   (2026-09-23)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.6.0   (2026-09-24)
 #
+#  1.6.0  Reworded PXE-server and DHCP-option recommendations for the Configuration Manager
+#         PXE Responder Service (no WDS role): dropped WDS from service-name references, and
+#         options 066/067 are now flagged HIGH as unsupported by the responder, not just redundant.
 #  1.5.0  Relay test: if no PXE server answers the relayed broadcast, send it a relay-style
 #         DHCPDISCOVER directly to tell a broken relay path from a PXE server problem.
 #         Recommendations no longer assume the IP helper is missing. Added -SkipRelayTest.
@@ -132,7 +135,7 @@ Param(
     [switch]$PassThru
 )
 
-$ScriptVersion = '1.5.0'
+$ScriptVersion = '1.6.0'
 $ErrorActionPreference = 'Stop'
 if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
 
@@ -560,7 +563,7 @@ else {
     Write-Stage "Stage 1 - DHCP DISCOVER (waiting $DiscoverTimeout s for offers)"
 
     try { $sock = New-UdpSocket -Port 68 }
-    catch { throw "Could not bind UDP port 68: $($_.Exception.Message). Run elevated, and not on a DHCP/WDS/PXE server." }
+    catch { throw "Could not bind UDP port 68: $($_.Exception.Message). Run elevated, and not on a DHCP server or the PXE-enabled distribution point itself." }
 
     try {
         $xid = New-Object byte[] 4; (New-Object Random).NextBytes($xid)
@@ -770,7 +773,7 @@ if (-not $TftpOnly) {
         $when = $runStart.ToString('HH:mm:ss')
         if ($pxeIp -and (Test-InSubnet $pxeIp $sub)) {
             Add-Action 'HIGH' "PXE server $pxeIp" `
-                "Check the PXE service (SccmPxe or WDSServer) is running on $pxeIp and review SMSPXE.log." `
+                "Check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log." `
                 "$pxeIp is on this subnet but didn't answer the PXE broadcast."
         }
         elseif ($pxeIp -and $chk -and $chk.RelayAnswered) {
@@ -799,17 +802,16 @@ if (-not $TftpOnly) {
         }
     }
 
-    # --- DHCP options 066/067
+    # --- DHCP options 060/066/067
     if ($hasDhcpPxeOpts) {
         $mismatch = $goodPxe -and $dhcpBootFile -and -not (Test-SamePath $goodPxe.BootFile $dhcpBootFile)
         $optFail = $tftpResults | Where-Object { $_.Kind -eq 'DHCP' -and -not $_.Success } | Select-Object -First 1
-        $prio = if ($mismatch -or $optFail) { 'HIGH' } else { 'MEDIUM' }
-        $fix = "Remove options 066 and 067 (currently 066/next-server='$dhcpNext', 067='$dhcpBootFile')."
+        $fix = "Remove options 066 and 067 (currently 066/next-server='$dhcpNext', 067='$dhcpBootFile'), and option 060 if it's also set on this scope."
         if ($ipHelperAction) { $fix += " Do this only after the PXE server answers PXE requests relayed from this subnet (the item above is fixed), or PXE will stop working here." }
-        $why = "066/067 give every client the same boot file whatever its firmware (BIOS or UEFI), and can override the PXE server's answer."
+        $why = "Options 060/066/067 aren't supported by the Configuration Manager PXE Responder Service (SccmPxe) - they give every client the same boot file whatever its firmware (BIOS or UEFI), and can override or conflict with the PXE responder's own answer."
         if ($mismatch) { $why += " 067 points to '$dhcpBootFile' but PXE server $($goodPxe.Server) hands out '$($goodPxe.BootFile)'." }
         if ($optFail) { $why += " Downloading the 067 file failed: $($optFail.Error)" }
-        Add-Action $prio $dhcpWhere $fix $why
+        Add-Action 'HIGH' $dhcpWhere $fix $why
     }
 
     # --- PXE server answers
