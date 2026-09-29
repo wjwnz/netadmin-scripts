@@ -6,7 +6,7 @@ usage, parameters and examples.
 
 | Script | Description |
 | --- | --- |
-| [`DHCP-PXE-TFTP-Test.ps1`](DHCP-PXE-TFTP-Test.ps1) | Tests the full SCCM / ConfigMgr PXE boot chain from a Windows client: DHCP discover, PXE boot server request (UDP 4011), TFTP download, and a report of recommended fixes for the subnet it's run from. |
+| [`SCCM/DHCP-PXE-TFTP-Test.ps1`](SCCM/DHCP-PXE-TFTP-Test.ps1) | Tests the full SCCM / ConfigMgr PXE boot chain from a Windows client: DHCP discover, PXE boot server request (UDP 4011), TFTP download, and a report of recommended fixes for the subnet it's run from. |
 
 ## Adding a new script
 
