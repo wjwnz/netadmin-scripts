@@ -1,7 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.10.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.11.0   (2026-10-01)
 #
+#  1.11.0 The PXE request result now always reports how many requests were sent and how long the reply
+#         took from the first request (and from the request that was answered). When there is no reply
+#         it reports the requests sent and the total time waited. PxeChecks in -PassThru gains
+#         Requests and ReplyMs.
 #  1.10.0 -Help (or -h) lists the options and exits. The script name and version are printed first
 #         thing on every run. Default -PxeTimeout raised from 15 to 60 seconds.
 #  1.9.0  The UDP 4011 PXE request is now retried: -PxeRequestCount (default 2) requests, each waiting
@@ -180,7 +184,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.10.0'
+$ScriptVersion = '1.11.0'
 $ErrorActionPreference = 'Stop'
 
 function Show-Usage {
@@ -419,18 +423,19 @@ function Invoke-PxeRequest([Net.Sockets.Socket]$Socket, [Net.IPAddress]$ServerIP
     # One transaction ID for every request, as a PXE ROM retransmits, so a late reply to an earlier request still matches
     $xid2 = New-Object byte[] 4; (New-Object Random).NextBytes($xid2)
     $req = New-DhcpPacket -MessageType 3 -Xid $xid2 -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -ClientIP $localIP
+    $total = [Diagnostics.Stopwatch]::StartNew()
+    $sent = 0; $ack = $null
     for ($attempt = 1; $attempt -le $PxeRequestCount; $attempt++) {
         [void]$Socket.SendTo($req, (New-Object Net.IPEndPoint($ServerIP, 4011)))
+        $sent = $attempt
         $ack = @(Receive-DhcpReplies -Socket $Socket -Xid $xid2 -TimeoutSeconds $PxeTimeout -FirstOnly) | Select-Object -First 1
-        if ($ack) {
-            $ack | Add-Member NoteProperty Attempt $attempt
-            return $ack
-        }
+        if ($ack) { break }
         if ($attempt -lt $PxeRequestCount) {
             Write-Host ("  {0,-15} no reply to PXE request {1} of {2} after {3} s - sending again" -f $ServerIP, $attempt, $PxeRequestCount, $PxeTimeout) -ForegroundColor Yellow
         }
     }
-    $null
+    # Requests = how many were sent; TotalMs = first request to reply (or to giving up); Ack.ElapsedMs = last request to reply
+    [pscustomobject]@{ Ack = $ack; Requests = $sent; TotalMs = [int64]$total.ElapsedMilliseconds }
 }
 
 function Invoke-RelayDiscover([Net.IPAddress]$ServerIP) {
@@ -804,21 +809,24 @@ else {
                 else { Write-Host ("  {0,-15} relay test: no answer to a relay-style DISCOVER sent directly ({1})" -f $t.Ip, $relay.Note) -ForegroundColor Yellow }
             }
 
-            $ack = Invoke-PxeRequest -Socket $sock -ServerIP ([Net.IPAddress]::Parse($t.Ip))
+            $pxeReq = Invoke-PxeRequest -Socket $sock -ServerIP ([Net.IPAddress]::Parse($t.Ip))
+            $ack = $pxeReq.Ack
             $file = $null; $next = $t.Ip
             if ($ack) {
                 $file = Get-BootFile $ack
                 $next = if ($ack.SIAddr -ne '0.0.0.0') { $ack.SIAddr } elseif ($ack.TftpServerName) { $ack.TftpServerName } else { $t.Ip }
-                $tryText = if ($ack.Attempt -gt 1) { " [request $($ack.Attempt) of $PxeRequestCount]" } else { '' }
-                Write-Host ("  [{0,5} ms] {1,-15} ({2}) -> BootFile='{3}' NextSrv={4}{5}" -f $ack.ElapsedMs, $t.Ip, $t.How, $file, $next, $tryText)
+                Write-Host ("  [{0,5} ms] {1,-15} ({2}) -> BootFile='{3}' NextSrv={4}" -f $pxeReq.TotalMs, $t.Ip, $t.How, $file, $next)
+                $lastText = if ($pxeReq.Requests -gt 1) { ", $($ack.ElapsedMs) ms after the last one" } else { '' }
+                Write-Host ("             reply to request {0} of {1}: {2} ms after the first request{3}" -f $pxeReq.Requests, $PxeRequestCount, $pxeReq.TotalMs, $lastText) -ForegroundColor DarkGray
                 $extra = ($ack.Options.Keys | Where-Object { $_ -in 43, 243, 250, 252 } | Sort-Object) -join ','
                 if ($extra) { Write-Verbose "  ACK carried vendor/WDS options: $extra" }
             }
             else {
-                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 ({2} request(s), {3} s each)" -f $t.Ip, $t.How, $PxeRequestCount, $PxeTimeout) -ForegroundColor Yellow
+                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 after {2} request(s), {3:N1} s in total ({4} s per request)" -f $t.Ip, $t.How, $pxeReq.Requests, ($pxeReq.TotalMs / 1000), $PxeTimeout) -ForegroundColor Yellow
             }
             $pxeChecks.Add([pscustomobject]@{
                 Server = $t.Ip; FoundVia = $t.How; Answered = [bool]$ack; BootFile = $file; NextServer = $next; Ack = $ack
+                Requests = $pxeReq.Requests; ReplyMs = $pxeReq.TotalMs
                 RelayTested = [bool]($relay -and $relay.Ran); RelayAnswered = [bool]($relay -and $relay.Answered)
             })
             if ($relay -and $relay.Ran) {
@@ -826,14 +834,14 @@ else {
                 else { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer a relay-style DISCOVER sent directly" }
             }
 
-            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($PxeRequestCount request(s), $PxeTimeout s each)" }
+            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($($pxeReq.Requests) request(s), $([math]::Round($pxeReq.TotalMs / 1000, 1)) s in total)" }
             elseif (-not $file) { Add-Result 'PXE' 'FAIL' "$($t.Ip) answered but gave no boot file" }
             elseif ($file -match 'abortpxe') {
                 Add-Result 'PXE' 'WARN' "$($t.Ip) returned '$file' - no deployment available for this MAC/GUID"
                 $tftpTargets.Add([pscustomobject]@{ Server = $next; File = $file; Kind = 'PXE' })
             }
             else {
-                Add-Result 'PXE' 'PASS' "$($t.Ip) -> $file (TFTP server $next)"
+                Add-Result 'PXE' 'PASS' "$($t.Ip) -> $file (TFTP server $next); reply to request $($pxeReq.Requests) of $PxeRequestCount in $($pxeReq.TotalMs) ms"
                 $tftpTargets.Add([pscustomobject]@{ Server = $next; File = $file; Kind = 'PXE' })
             }
         }
