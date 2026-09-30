@@ -1,7 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.8.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.8.1   (2026-10-01)
 #
+#  1.8.1  Relay test is skipped when the PXE server is on this PC's own subnet (no relay is involved,
+#         so a 'FAIL' was meaningless). If the PXE server is on this subnet and answers on UDP 4011 but
+#         not the broadcast, that is now a LOW note (this script's DISCOVER comes from a PC that has an
+#         IP address, unlike a real PXE ROM, so real clients may still work) instead of HIGH.
 #  1.8.0  MAC and GUID now default to this computer's: the MAC of the active physical Ethernet adapter
 #         and the SMBIOS UUID, so the PXE server sees a real, known device. -MacAddressString and
 #         -UUIDString still override. Falls back to the old dummy values (with a warning) if not found.
@@ -97,7 +101,8 @@
 .PARAMETER SkipRelayTest
     Don't run the relay test. Normally, if no PXE server answers the relayed broadcast, the script sends
     the PXE server a relay-style DHCPDISCOVER directly (from UDP 67, with this PC as the relay address)
-    to tell a broken router relay path apart from a PXE server problem.
+    to tell a broken router relay path apart from a PXE server problem. The test is skipped automatically
+    when the PXE server is on the same subnet as this PC, because no relay is involved there.
 
 .PARAMETER SkipDirectedBroadcast
     Only send the DHCPDISCOVER to 255.255.255.255. Normally it is also sent to the subnet-directed broadcast
@@ -149,7 +154,7 @@ Param(
     [switch]$PassThru
 )
 
-$ScriptVersion = '1.8.0'
+$ScriptVersion = '1.8.1'
 $ErrorActionPreference = 'Stop'
 if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
 
@@ -729,7 +734,10 @@ else {
         foreach ($t in $pxeTargets) {
             # Relay test - only needed when nothing answered the (relayed) broadcast
             $relay = $null
-            if ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest) {
+            if ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest -and (Test-InSubnet $t.Ip $sub)) {
+                Write-Host "  Relay test to $($t.Ip) skipped: it is on this PC's own subnet, so no relay is involved." -ForegroundColor DarkGray
+            }
+            elseif ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest) {
                 $relay = Invoke-RelayDiscover ([Net.IPAddress]::Parse($t.Ip))
                 if (-not $relay.Ran) { Write-Host "  Relay test to $($t.Ip) skipped: $($relay.Note)" -ForegroundColor Yellow }
                 elseif ($relay.Answered) { Write-Host ("  [{0,5} ms] {1,-15} relay test: answered a relay-style DISCOVER sent directly ({2})" -f $relay.Offer.ElapsedMs, $t.Ip, $relay.Note) -ForegroundColor Green }
@@ -861,10 +869,15 @@ if (-not $TftpOnly) {
         $gwName = if ($sub -and $sub.Gateway) { $sub.Gateway } else { "the router" }
         $alongside = if ($dhcpSrv) { " as well as the DHCP server ($dhcpSrv)" } else { '' }
         $when = $runStart.ToString('HH:mm:ss')
-        if ($pxeIp -and (Test-InSubnet $pxeIp $sub)) {
+        if ($pxeIp -and (Test-InSubnet $pxeIp $sub) -and $chk -and $chk.Answered) {
+            Add-Action 'LOW' "PXE server $pxeIp" `
+                "If a real PXE client on this subnet boots, no action is needed. Otherwise check SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText, and that this PC's firewall allows inbound UDP 68 (run the script again with a rule allowing it for powershell.exe)." `
+                "$pxeIp is on this subnet and answered on UDP 4011, but sent no reply to this script's broadcast DISCOVER. That can be a false alarm: a real PXE ROM sends from IP 0.0.0.0, while this script sends from a PC that already has an address, which the PXE Responder may ignore."
+        }
+        elseif ($pxeIp -and (Test-InSubnet $pxeIp $sub)) {
             Add-Action 'HIGH' "PXE server $pxeIp" `
                 "Check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log." `
-                "$pxeIp is on this subnet but didn't answer the PXE broadcast."
+                "$pxeIp is on this subnet but didn't answer the PXE broadcast or the request on UDP 4011."
         }
         elseif ($pxeIp -and $chk -and $chk.RelayAnswered) {
             $ipHelperAction = $true
