@@ -1,7 +1,12 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.12.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.13.0   (2026-10-01)
 #
+#  1.13.0 DHCPDISCOVERs are now resent like a PXE ROM does (same transaction ID, at 4, 12 and 28 s, with the
+#         'seconds elapsed' field set to the time since the first one). A ConfigMgr PXE server with a PXE
+#         response delay (SMSPXE.log: 'Client time since boot is 4. Response delay is 10. Ignoring
+#         request.') ignores a DISCOVER until that field reaches the delay, so a single DISCOVER never got
+#         an answer. Late PXE replies are flagged. Added -NoDiscoverResend to send just one.
 #  1.12.0 Failures now name the equivalent PXE ROM error code (from Microsoft's 'Advanced troubleshooting for
 #         PXE boot issues'): PXE-E51 no offers, PXE-E52 only ProxyDHCP offers, PXE-E78 no PXE server,
 #         PXE-E55 no reply on UDP 4011, PXE-E53 no boot file, PXE-E32/E35/E36/E3B/T04 for TFTP failures.
@@ -148,6 +153,11 @@
     Only send the DHCPDISCOVER to 255.255.255.255. Normally it is also sent to the subnet-directed broadcast
     address of every active local IPv4 interface (e.g. 10.40.96.255), which some routers/relays treat differently.
 
+.PARAMETER NoDiscoverResend
+    Send each DHCPDISCOVER only once. Normally it is resent after 4, 12 and 28 s with the 'seconds elapsed'
+    field set to the time since the first, as a PXE ROM does. A PXE server with a response delay configured
+    ignores a DISCOVER until that field reaches the delay, so without the resends it never answers.
+
 .PARAMETER PassThru
     Return a result object as well as printing the report.
 
@@ -193,12 +203,15 @@ Param(
     [String]$ReportPath,
     [switch]$SkipRelayTest,
     [switch]$SkipDirectedBroadcast,
+    [switch]$NoDiscoverResend,
     [switch]$PassThru,
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.12.0'
+$ScriptVersion = '1.13.0'
 $ErrorActionPreference = 'Stop'
+# A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
+$DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
 
 function Show-Usage {
     Write-Host "DHCP-PXE-TFTP-Test.ps1 v$ScriptVersion" -ForegroundColor White
@@ -423,12 +436,17 @@ function New-UdpSocket([int]$Port = 0) {
 }
 
 function Receive-DhcpReplies {
-    param([Net.Sockets.Socket]$Socket, [byte[]]$Xid, [int]$TimeoutSeconds, [switch]$FirstOnly)
+    param([Net.Sockets.Socket]$Socket, [byte[]]$Xid, [int]$TimeoutSeconds, [switch]$FirstOnly, [int[]]$ResendAt = @(), [scriptblock]$Resend)
     $xidString = [BitConverter]::ToString($Xid)
+    $nextResend = 0
     $results = New-Object System.Collections.Generic.List[object]
     $buf = New-Object byte[] 4096
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if ($Resend -and $nextResend -lt $ResendAt.Count -and $sw.Elapsed.TotalSeconds -ge $ResendAt[$nextResend]) {
+            & $Resend ([int]$sw.Elapsed.TotalSeconds)    # retransmit with the elapsed time in the 'secs' field
+            $nextResend++
+        }
         if (-not $Socket.Poll(200000, [Net.Sockets.SelectMode]::SelectRead)) { continue }
         $remote = [Net.EndPoint](New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0))
         try { $n = $Socket.ReceiveFrom($buf, [ref]$remote) } catch [Net.Sockets.SocketException] { continue }
@@ -475,7 +493,14 @@ function Invoke-RelayDiscover([Net.IPAddress]$ServerIP) {
         $pkt[3] = 1                                                          # hops
         [Array]::Copy($localIP.GetAddressBytes(), 0, $pkt, 24, 4)           # giaddr
         [void]$rs.SendTo($pkt, (New-Object Net.IPEndPoint($ServerIP, 67)))
-        $replies = @(Receive-DhcpReplies -Socket $rs -Xid $x -TimeoutSeconds $PxeTimeout -FirstOnly)
+        $resendRelay = {
+            param($elapsed)
+            $relayPkt = New-DhcpPacket -MessageType 1 -Xid $x -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed ([math]::Max(4, $elapsed))
+            $relayPkt[3] = 1
+            [Array]::Copy($localIP.GetAddressBytes(), 0, $relayPkt, 24, 4)
+            [void]$rs.SendTo($relayPkt, (New-Object Net.IPEndPoint($ServerIP, 67)))
+        }
+        $replies = @(Receive-DhcpReplies -Socket $rs -Xid $x -TimeoutSeconds $PxeTimeout -FirstOnly -ResendAt $DiscoverResendAt -Resend $resendRelay)
         $offer = $replies | Where-Object { $_.VendorClass -like 'PXEClient*' } | Select-Object -First 1
         [pscustomobject]@{ Ran = $true; Answered = [bool]$offer; Offer = $offer; Note = "relay address $localIP" }
     }
@@ -742,17 +767,28 @@ else {
     try {
         $xid = New-Object byte[] 4; (New-Object Random).NextBytes($xid)
         $discover = New-DhcpPacket -MessageType 1 -Xid $xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast
-        [void]$sock.SendTo($discover, (New-Object Net.IPEndPoint([Net.IPAddress]::Broadcast, 67)))
+        $discoverEndpoints = New-Object System.Collections.Generic.List[Net.IPEndPoint]
+        $discoverEndpoints.Add((New-Object Net.IPEndPoint([Net.IPAddress]::Broadcast, 67)))
         $sentTo = @('255.255.255.255')
         if (-not $SkipDirectedBroadcast) {
             # Same packet (same XID) to each local subnet's directed broadcast, e.g. 10.40.96.255
             foreach ($bc in @(Get-LocalBroadcastAddresses)) {
-                try { [void]$sock.SendTo($discover, (New-Object Net.IPEndPoint($bc.Broadcast, 67))); $sentTo += "$($bc.Broadcast) ($($bc.Local))" }
-                catch { Write-Host "  Could not send to directed broadcast $($bc.Broadcast): $($_.Exception.Message)" -ForegroundColor Yellow }
+                $discoverEndpoints.Add((New-Object Net.IPEndPoint($bc.Broadcast, 67)))
+                $sentTo += "$($bc.Broadcast) ($($bc.Local))"
             }
         }
+        foreach ($ep in $discoverEndpoints) {
+            try { [void]$sock.SendTo($discover, $ep) }
+            catch { Write-Host "  Could not send to $($ep.Address): $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
         Write-Host "  DISCOVER sent to: $($sentTo -join ', ')"
-        $offers = @(Receive-DhcpReplies -Socket $sock -Xid $xid -TimeoutSeconds $DiscoverTimeout)
+        if ($DiscoverResendAt.Count) { Write-Host "  Resent at $($DiscoverResendAt -join ', ') s, as a PXE ROM does (-NoDiscoverResend to send once)" -ForegroundColor DarkGray }
+        $resendDiscover = {
+            param($elapsed)
+            $resendPkt = New-DhcpPacket -MessageType 1 -Xid $xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed ([math]::Max(4, $elapsed))
+            foreach ($resendEp in $discoverEndpoints) { try { [void]$sock.SendTo($resendPkt, $resendEp) } catch { } }
+        }
+        $offers = @(Receive-DhcpReplies -Socket $sock -Xid $xid -TimeoutSeconds $DiscoverTimeout -ResendAt $DiscoverResendAt -Resend $resendDiscover)
         # A server reached by both broadcasts answers twice: keep the first reply of each kind
         $offers = @($offers | Group-Object { '{0}|{1}|{2}|{3}' -f $_.SourceIP, $_.ServerIdentifier, $_.YIAddr, $_.MessageType } | ForEach-Object { $_.Group[0] })
 
@@ -765,6 +801,7 @@ else {
             $o | Add-Member NoteProperty HasLease $hasLease
             Write-Host ("  [{0,5} ms] {1,-13} from {2,-15} ServerID={3,-15} YourIP={4,-15} NextSrv={5,-15} File='{6}'" -f `
                 $o.ElapsedMs, $role, $o.SourceIP, $o.ServerIdentifier, $o.YIAddr, $o.SIAddr, (Get-BootFile $o))
+            if ($o.IsPxe -and $o.ElapsedMs -ge 4000) { Write-Host ("             late reply ({0:N1} s): this PXE server probably has a PXE response delay configured" -f ($o.ElapsedMs / 1000)) -ForegroundColor Yellow }
             if ($o.IPxeConfigUrl) { Write-Host "             iPXE / 2Pint config URL: $($o.IPxeConfigUrl)" }
         }
 
@@ -999,6 +1036,14 @@ if (-not $TftpOnly) {
                 "Make sure the DHCP relay (IP helper) for $subText forwards to the PXE-enabled distribution point that should serve this office. Rerun with -PxeServer <DP IP> to test that DP directly." `
                 "No PXE server answered, and DHCP doesn't point to one."
         }
+    }
+
+    # --- PXE response delay (server ignores early DISCOVERs)
+    foreach ($po in ($proxyOffers | Where-Object { $_.ElapsedMs -ge 4000 })) {
+        $who = if ($po.ServerIdentifier) { $po.ServerIdentifier } else { $po.SourceIP }
+        Add-Action 'LOW' "PXE server $who" `
+            "If this isn't deliberate, set the PXE response delay on the distribution point to 0 (distribution point properties, PXE tab). Only use a delay when several PXE servers answer the same subnet and one should win." `
+            "$who answered the broadcast only after $([math]::Round($po.ElapsedMs / 1000, 1)) s. A PXE server with a response delay ignores each DISCOVER until the client's elapsed time reaches the delay (SMSPXE.log: 'Response delay is N. Ignoring request.'), so real clients wait that long before PXE starts."
     }
 
     # --- DHCP options 060/066/067
