@@ -1,7 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.11.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.11.2   (2026-10-01)
 #
+#  1.11.2 Default -DiscoverTimeout raised from 4 to 60 seconds (same as -PxeTimeout). The broadcast
+#         DISCOVER collects every offer, so Stage 1 now always takes the full -DiscoverTimeout.
+#  1.11.1 The relay-style DISCOVER now waits -PxeTimeout seconds (default 60) for the reply instead of
+#         -DiscoverTimeout (4 s), and stops waiting as soon as the PXE server answers.
 #  1.11.0 The PXE request result now always reports how many requests were sent and how long the reply
 #         took from the first request (and from the request that was answered). When there is no reply
 #         it reports the requests sent and the total time waited. PxeChecks in -PassThru gains
@@ -75,15 +79,16 @@
     Vendor class. Defaults to PXEClient:Arch:<arch>:UNDI:003000.
 
 .PARAMETER DiscoverTimeout
-    Seconds to wait for offers / ACKs. Increase if the DP has a PXE response delay configured.
+    Seconds to wait for replies to the broadcast DHCP DISCOVER (default 60). All offers received in that time
+    are listed, so Stage 1 always takes this long. Increase it if the DP has a PXE response delay configured.
 
 .PARAMETER PxeRequestCount
     How many times to send the PXE request to UDP 4011 on each PXE server before giving up (default 2).
     Sending stops at the first reply. Each request waits -PxeTimeout seconds.
 
 .PARAMETER PxeTimeout
-    Seconds to wait for the reply to each PXE request on UDP 4011 (default 60). The DHCP DISCOVER
-    wait is set separately by -DiscoverTimeout.
+    Seconds to wait for the reply to each PXE request on UDP 4011 and for the reply to the relay-style
+    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (also default 60).
 
 .PARAMETER PxeServer
     Also send the 4011 request to this server even if it didn't answer the DISCOVER.
@@ -163,7 +168,7 @@ Param(
     [String]$UUIDString,
     [ValidateRange(0, 65535)][int]$ProcessorArchitecture = 7,
     [String]$Option60String,
-    [int]$DiscoverTimeout = 4,
+    [int]$DiscoverTimeout = 60,
     [ValidateRange(1, 20)][int]$PxeRequestCount = 2,
     [ValidateRange(1, 300)][int]$PxeTimeout = 60,
     [String]$PxeServer,
@@ -184,7 +189,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.11.0'
+$ScriptVersion = '1.11.2'
 $ErrorActionPreference = 'Stop'
 
 function Show-Usage {
@@ -450,7 +455,7 @@ function Invoke-RelayDiscover([Net.IPAddress]$ServerIP) {
         $pkt[3] = 1                                                          # hops
         [Array]::Copy($localIP.GetAddressBytes(), 0, $pkt, 24, 4)           # giaddr
         [void]$rs.SendTo($pkt, (New-Object Net.IPEndPoint($ServerIP, 67)))
-        $replies = @(Receive-DhcpReplies -Socket $rs -Xid $x -TimeoutSeconds $DiscoverTimeout)
+        $replies = @(Receive-DhcpReplies -Socket $rs -Xid $x -TimeoutSeconds $PxeTimeout -FirstOnly)
         $offer = $replies | Where-Object { $_.VendorClass -like 'PXEClient*' } | Select-Object -First 1
         [pscustomobject]@{ Ran = $true; Answered = [bool]$offer; Offer = $offer; Note = "relay address $localIP" }
     }
@@ -806,7 +811,7 @@ else {
                 $relay = Invoke-RelayDiscover ([Net.IPAddress]::Parse($t.Ip))
                 if (-not $relay.Ran) { Write-Host "  Relay test to $($t.Ip) skipped: $($relay.Note)" -ForegroundColor Yellow }
                 elseif ($relay.Answered) { Write-Host ("  [{0,5} ms] {1,-15} relay test: answered a relay-style DISCOVER sent directly ({2})" -f $relay.Offer.ElapsedMs, $t.Ip, $relay.Note) -ForegroundColor Green }
-                else { Write-Host ("  {0,-15} relay test: no answer to a relay-style DISCOVER sent directly ({1})" -f $t.Ip, $relay.Note) -ForegroundColor Yellow }
+                else { Write-Host ("  {0,-15} relay test: no answer to a relay-style DISCOVER sent directly after {2} s ({1})" -f $t.Ip, $relay.Note, $PxeTimeout) -ForegroundColor Yellow }
             }
 
             $pxeReq = Invoke-PxeRequest -Socket $sock -ServerIP ([Net.IPAddress]::Parse($t.Ip))
