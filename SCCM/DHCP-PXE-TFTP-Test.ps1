@@ -1,7 +1,13 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.9.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.11.0   (2026-10-01)
 #
+#  1.11.0 The PXE request result now always reports how many requests were sent and how long the reply
+#         took from the first request (and from the request that was answered). When there is no reply
+#         it reports the requests sent and the total time waited. PxeChecks in -PassThru gains
+#         Requests and ReplyMs.
+#  1.10.0 -Help (or -h) lists the options and exits. The script name and version are printed first
+#         thing on every run. Default -PxeTimeout raised from 15 to 60 seconds.
 #  1.9.0  The UDP 4011 PXE request is now retried: -PxeRequestCount (default 2) requests, each waiting
 #         -PxeTimeout seconds (default 15) for the reply. The retries reuse one transaction ID, like a
 #         real PXE ROM, so a late reply to an earlier request is still accepted. Previously it was a
@@ -76,7 +82,7 @@
     Sending stops at the first reply. Each request waits -PxeTimeout seconds.
 
 .PARAMETER PxeTimeout
-    Seconds to wait for the reply to each PXE request on UDP 4011 (default 15). The DHCP DISCOVER
+    Seconds to wait for the reply to each PXE request on UDP 4011 (default 60). The DHCP DISCOVER
     wait is set separately by -DiscoverTimeout.
 
 .PARAMETER PxeServer
@@ -109,6 +115,15 @@
 
 .PARAMETER ReportPath
     CSV file to append one summary row to per run (e.g. a share), so results from every office can be compared.
+
+.PARAMETER TftpTimeout
+    Seconds to wait for each TFTP packet before it is retransmitted (default 3).
+
+.PARAMETER TftpRetries
+    How many times a TFTP packet is retransmitted before the download fails (default 5).
+
+.PARAMETER Help
+    List the options and exit. Alias: -h.
 
 .PARAMETER SkipRelayTest
     Don't run the relay test. Normally, if no PXE server answers the relayed broadcast, the script sends
@@ -150,7 +165,7 @@ Param(
     [String]$Option60String,
     [int]$DiscoverTimeout = 4,
     [ValidateRange(1, 20)][int]$PxeRequestCount = 2,
-    [ValidateRange(1, 300)][int]$PxeTimeout = 15,
+    [ValidateRange(1, 300)][int]$PxeTimeout = 60,
     [String]$PxeServer,
     [String]$TftpServer,
     [String]$BootFile,
@@ -165,11 +180,40 @@ Param(
     [String]$ReportPath,
     [switch]$SkipRelayTest,
     [switch]$SkipDirectedBroadcast,
-    [switch]$PassThru
+    [switch]$PassThru,
+    [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.9.0'
+$ScriptVersion = '1.11.0'
 $ErrorActionPreference = 'Stop'
+
+function Show-Usage {
+    Write-Host "DHCP-PXE-TFTP-Test.ps1 v$ScriptVersion" -ForegroundColor White
+    Write-Host "Usage: .\DHCP-PXE-TFTP-Test.ps1 [options]   (all options are optional)"
+    Write-Host ""
+    $params = @()
+    try { $params = @((Get-Help $PSCommandPath -Full -ErrorAction Stop).parameters.parameter) } catch { }
+    if (-not $params) {
+        Write-Host "Could not read the option list. Run: Get-Help .\DHCP-PXE-TFTP-Test.ps1 -Full"
+        return
+    }
+    Write-Host "Options:"
+    foreach ($p in $params) {
+        $type = if ($p.type.name -eq 'SwitchParameter') { '' } else { " <$($p.type.name)>" }
+        Write-Host ("  -{0}{1}" -f $p.name, $type) -ForegroundColor Cyan
+        foreach ($d in @($p.description)) {
+            foreach ($line in (($d.Text -split "`r?`n") | Where-Object { $_.Trim() })) { Write-Host "      $($line.Trim())" }
+        }
+    }
+    Write-Host ""
+    Write-Host "Examples: Get-Help .\DHCP-PXE-TFTP-Test.ps1 -Examples     Full help: Get-Help .\DHCP-PXE-TFTP-Test.ps1 -Full"
+}
+
+if ($Help) { Show-Usage; return }
+
+# Name and version first, before anything else can print
+Write-Host "SCCM PXE boot chain test v$ScriptVersion - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') on $env:COMPUTERNAME" -ForegroundColor White
+
 if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
 
 #region ---------------------------------------------------------------- Helpers
@@ -379,18 +423,19 @@ function Invoke-PxeRequest([Net.Sockets.Socket]$Socket, [Net.IPAddress]$ServerIP
     # One transaction ID for every request, as a PXE ROM retransmits, so a late reply to an earlier request still matches
     $xid2 = New-Object byte[] 4; (New-Object Random).NextBytes($xid2)
     $req = New-DhcpPacket -MessageType 3 -Xid $xid2 -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -ClientIP $localIP
+    $total = [Diagnostics.Stopwatch]::StartNew()
+    $sent = 0; $ack = $null
     for ($attempt = 1; $attempt -le $PxeRequestCount; $attempt++) {
         [void]$Socket.SendTo($req, (New-Object Net.IPEndPoint($ServerIP, 4011)))
+        $sent = $attempt
         $ack = @(Receive-DhcpReplies -Socket $Socket -Xid $xid2 -TimeoutSeconds $PxeTimeout -FirstOnly) | Select-Object -First 1
-        if ($ack) {
-            $ack | Add-Member NoteProperty Attempt $attempt
-            return $ack
-        }
+        if ($ack) { break }
         if ($attempt -lt $PxeRequestCount) {
             Write-Host ("  {0,-15} no reply to PXE request {1} of {2} after {3} s - sending again" -f $ServerIP, $attempt, $PxeRequestCount, $PxeTimeout) -ForegroundColor Yellow
         }
     }
-    $null
+    # Requests = how many were sent; TotalMs = first request to reply (or to giving up); Ack.ElapsedMs = last request to reply
+    [pscustomobject]@{ Ack = $ack; Requests = $sent; TotalMs = [int64]$total.ElapsedMilliseconds }
 }
 
 function Invoke-RelayDiscover([Net.IPAddress]$ServerIP) {
@@ -652,7 +697,6 @@ $pxeChecks = New-Object System.Collections.Generic.List[object]
 $tftpTargets = New-Object System.Collections.Generic.List[object]
 $tftpResults = New-Object System.Collections.Generic.List[object]
 
-Write-Host "SCCM PXE boot chain test v$ScriptVersion - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') on $env:COMPUTERNAME" -ForegroundColor White
 Write-Host "  MAC  : $macText$macNote"
 Write-Host "  GUID : $uuid$uuidNote"
 Write-Host "  Arch : $ProcessorArchitecture  ($Option60String)"
@@ -765,21 +809,24 @@ else {
                 else { Write-Host ("  {0,-15} relay test: no answer to a relay-style DISCOVER sent directly ({1})" -f $t.Ip, $relay.Note) -ForegroundColor Yellow }
             }
 
-            $ack = Invoke-PxeRequest -Socket $sock -ServerIP ([Net.IPAddress]::Parse($t.Ip))
+            $pxeReq = Invoke-PxeRequest -Socket $sock -ServerIP ([Net.IPAddress]::Parse($t.Ip))
+            $ack = $pxeReq.Ack
             $file = $null; $next = $t.Ip
             if ($ack) {
                 $file = Get-BootFile $ack
                 $next = if ($ack.SIAddr -ne '0.0.0.0') { $ack.SIAddr } elseif ($ack.TftpServerName) { $ack.TftpServerName } else { $t.Ip }
-                $tryText = if ($ack.Attempt -gt 1) { " [request $($ack.Attempt) of $PxeRequestCount]" } else { '' }
-                Write-Host ("  [{0,5} ms] {1,-15} ({2}) -> BootFile='{3}' NextSrv={4}{5}" -f $ack.ElapsedMs, $t.Ip, $t.How, $file, $next, $tryText)
+                Write-Host ("  [{0,5} ms] {1,-15} ({2}) -> BootFile='{3}' NextSrv={4}" -f $pxeReq.TotalMs, $t.Ip, $t.How, $file, $next)
+                $lastText = if ($pxeReq.Requests -gt 1) { ", $($ack.ElapsedMs) ms after the last one" } else { '' }
+                Write-Host ("             reply to request {0} of {1}: {2} ms after the first request{3}" -f $pxeReq.Requests, $PxeRequestCount, $pxeReq.TotalMs, $lastText) -ForegroundColor DarkGray
                 $extra = ($ack.Options.Keys | Where-Object { $_ -in 43, 243, 250, 252 } | Sort-Object) -join ','
                 if ($extra) { Write-Verbose "  ACK carried vendor/WDS options: $extra" }
             }
             else {
-                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 ({2} request(s), {3} s each)" -f $t.Ip, $t.How, $PxeRequestCount, $PxeTimeout) -ForegroundColor Yellow
+                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 after {2} request(s), {3:N1} s in total ({4} s per request)" -f $t.Ip, $t.How, $pxeReq.Requests, ($pxeReq.TotalMs / 1000), $PxeTimeout) -ForegroundColor Yellow
             }
             $pxeChecks.Add([pscustomobject]@{
                 Server = $t.Ip; FoundVia = $t.How; Answered = [bool]$ack; BootFile = $file; NextServer = $next; Ack = $ack
+                Requests = $pxeReq.Requests; ReplyMs = $pxeReq.TotalMs
                 RelayTested = [bool]($relay -and $relay.Ran); RelayAnswered = [bool]($relay -and $relay.Answered)
             })
             if ($relay -and $relay.Ran) {
@@ -787,14 +834,14 @@ else {
                 else { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer a relay-style DISCOVER sent directly" }
             }
 
-            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($PxeRequestCount request(s), $PxeTimeout s each)" }
+            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($($pxeReq.Requests) request(s), $([math]::Round($pxeReq.TotalMs / 1000, 1)) s in total)" }
             elseif (-not $file) { Add-Result 'PXE' 'FAIL' "$($t.Ip) answered but gave no boot file" }
             elseif ($file -match 'abortpxe') {
                 Add-Result 'PXE' 'WARN' "$($t.Ip) returned '$file' - no deployment available for this MAC/GUID"
                 $tftpTargets.Add([pscustomobject]@{ Server = $next; File = $file; Kind = 'PXE' })
             }
             else {
-                Add-Result 'PXE' 'PASS' "$($t.Ip) -> $file (TFTP server $next)"
+                Add-Result 'PXE' 'PASS' "$($t.Ip) -> $file (TFTP server $next); reply to request $($pxeReq.Requests) of $PxeRequestCount in $($pxeReq.TotalMs) ms"
                 $tftpTargets.Add([pscustomobject]@{ Server = $next; File = $file; Kind = 'PXE' })
             }
         }
