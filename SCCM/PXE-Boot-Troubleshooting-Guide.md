@@ -1,0 +1,162 @@
+# PXE Boot Troubleshooting Guide (Revised)
+
+## Introduction
+
+Use this guide when a device fails to PXE boot or fails during imaging. Start with the quick triage table, decide whether the problem is one device or a whole site, then work through the steps in order.
+
+- **Audience:** service desk and field technicians, with EEA and SCCM Server Admins as the escalation teams.
+- **Scope:** UEFI PXE imaging of Windows 11 through Configuration Manager. BIOS settings are given for Dell systems only.
+- **What good looks like:** the device shows "Start PXE over IPv4", then loads WDS Boot Manager, then starts the task sequence. If you reach WDS Boot Manager, PXE itself is working.
+- **Owner and last review date:** to be added before publishing.
+
+## Quick triage: what do you see?
+
+Find the on-screen symptom, then go to the step shown. If more than one device is affected, read "Who owns the problem" first.
+
+| What the screen shows | Likely cause | Go to |
+| --- | --- | --- |
+| No link lights, "Media test failure" or "Media absent" | Cable, port, dock or adapter | Step 3 |
+| "Start PXE over IPv4" then times out, or `PXE-E51` (no DHCP or proxyDHCP offers received) or PXE-E52 (proxyDHCP offers received, no DHCP offers) | No DHCP offer: GNDS registration missing or expired, port not authorised, or a DHCP or network problem | Steps 5 and 3. If other devices also fail, it is site-wide. |
+| "No bootable device found" after PXE fails | Check GNDS for an IP address for the device. No IP: registration missing or expired, or wrong BIOS settings. Has an IP: the SCCM server is not replying in a timely fashion. | Step 5 (check GNDS first). No IP: Steps 5 and 2. Has an IP: Step 7 (SCCM Server Admins). |
+| `PXE-E53` (no boot filename received) or `PXE-E55` (proxyDHCP did not reply on port 4011), or PXE-E77 / PXE-E78 (bad or missing discovery server list, could not locate boot server) | PXE responder not answering: device unknown or no deployment, or a DHCP relay problem | One device: Step 8 (EEA). Several devices: Step 7 (SCCM Server Admins). |
+| `PXE-E32` (TFTP open timeout) or `PXE-E3B` (file not found), PXE-E35 (TFTP read timeout), PXE-E36 (error received from TFTP server), PXE-E3F (invalid TFTP packet size) or PXE-T04 (access violation) | TFTP blocked on the network, or boot file not available | Step 7 (SCCM Server Admins and network team) |
+| "Operating system loader has no signature" | Secure Boot certificate, old BIOS, or boot image not signed for Secure Boot | Step 4 |
+| WDS Boot Manager loads, then the task sequence shows an error code | PXE works. The problem is in the image or task sequence. | Step 8: collect `smsts.log` and the error code |
+
+## Who owns the problem
+
+Decide first whether it is one device or the whole site: try a known-good device on the same port or network, or a second device in the same office.
+
+| Situation | What to do | Who to contact |
+| --- | --- | --- |
+| **Site-wide:** two or more devices fail, or a known-good device also fails on that network | Do not troubleshoot each device. Log one ticket with the site, subnet or VLAN, the time, the devices tested and the exact error text. Run the test in Step 7 if you can. | **SCCM Server Admins** (Windows Server - Corporate) |
+| **Single device:** other devices at the same location PXE boot fine | Work through Steps 2 to 6 (BIOS, cable or dock, Secure Boot, GNDS, USB boot). | Then the **EEA team** (Step 8) |
+| **Fails after the boot image loads:** a task sequence error, even on one device | Collect `smsts.log` and the error code (Step 8). | **EEA team** |
+
+If the cause is a network link problem at the site, such as no link or 802.1x not authorising ports, tell the network team as well.
+
+**Exception:** if the error is "No bootable device found" and GNDS shows the device has an IP address, the SCCM server is not replying in a timely fashion. Contact the **SCCM Server Admins**, even for a single device (see Step 5).
+
+## Step 1: Verify prerequisites
+
+Confirm these before troubleshooting PXE itself:
+
+- The device's MAC address is added to the GNDS site before it is connected to the network (GNDS 4 networks only). If you use a dock or USB Ethernet adapter with MAC pass-through, register the MAC the device presents (the pass-through MAC), not the adapter's own.
+- The device is on a wired connection.
+- The network cable, dock or USB Ethernet adapter works.
+- The device is connected to power.
+- Other devices at the same location can PXE boot. If none can, follow "Who owns the problem" and log a ticket for the SCCM Server Admins.
+
+## Step 2: Check BIOS settings
+
+These settings are for Dell systems. For other makes, use the equivalent settings from the vendor.
+
+| Setting | Value |
+| --- | --- |
+| Boot Mode | UEFI |
+| PXE Enabled | Yes |
+| UEFI Network Stack | Enabled |
+| Legacy Option ROMs | Disabled |
+| Secure Boot | Enabled (or temporarily disabled for troubleshooting) |
+| Thunderbolt boot support | Enabled |
+| IPv4 PXE Boot | Enabled |
+| MAC Address Pass-Through | Passthrough MAC Address |
+
+If PXE still fails:
+
+1. Reset the BIOS to factory defaults. This can clear a BIOS password, change the TPM or Secure Boot state, and trigger BitLocker recovery on a device that already has Windows, so check first.
+2. Reapply the PXE settings above.
+3. Save and reboot.
+
+## Step 3: Check the network connection
+
+Confirm the link is up and the lights are flashing.
+
+1. Unplug the network cable for two minutes, then plug it back in.
+2. Try another network port.
+3. Try another dock or adapter.
+4. Test a known-good device on the same port and cable. If it also fails, the problem is the port or network, not the device.
+
+## Step 4: Secure Boot error
+
+Symptom: "Operating System Loader Has No Signature".
+
+Causes:
+
+- The 2023 Secure Boot CA certificate is missing.
+- The BIOS is out of date.
+- The boot image is not compatible with Secure Boot.
+
+Resolution:
+
+1. Check the BIOS version against the minimum required, then update the BIOS if it is older.
+2. Retry PXE boot.
+3. If it still fails, temporarily disable Secure Boot.
+4. Confirm Secure Boot is enabled again after imaging.
+
+## Step 5: GNDS issues (GNDS 4 offices)
+
+Symptom: "No bootable device found". A DHCP timeout or a device stuck at "Start PXE over IPv4" can have the same cause, because an unregistered device gets no network access.
+
+**First, check GNDS for an IP address for the device.**
+
+- **The device has an IP address:** the network and GNDS registration are fine, so the SCCM server is not replying in a timely fashion. Log a ticket for the SCCM Server Admins (Step 7). Include the device's IP from GNDS, its MAC address and the time of the attempt.
+- **The device has no IP address:** work through the checks below.
+
+If the device has no IP address, check:
+
+- The computer account is added to the GNDS site. Follow the knowledge base article "Imaging in Offices with 802.1x Enabled on all Ports" (KB0013474) to add it correctly.
+- The expiry time is still valid. Devices get 8 hours to image once added to GNDS.
+- The registered MAC is the one the device presents (see the dock and adapter note in Step 1).
+
+## Step 6: Use a USB drive
+
+Use this when PXE fails but the device, network and GNDS registration are fine. Create a bootable USB by following the knowledge base article "Create Bootable USB". This is the equivalent of PXE booting, not the full offline USB media.
+
+Open question: does the USB boot still need the network and GNDS registration? State the answer here once confirmed.
+
+## Step 7: Network and server checks (SCCM Server Admins and network team)
+
+Use this step for site-wide failures, or when the device-side steps found nothing.
+
+**Run the PXE test script.** From a Windows PC on the same VLAN as the failing device, open an elevated PowerShell window and run `.\SCCM\DHCP-PXE-TFTP-Test.ps1` from the netadmin-scripts repo. Add `-PxeServer <DP IP>` to test a specific distribution point. Do not run it on the DHCP server or the distribution point itself. It checks DHCP offers, the PXE server on UDP 4011 and a TFTP download of the boot file, and lists recommended actions for the subnet.
+
+Read its result with care: the script's broadcast discovery comes from a PC that already has an IP address, while a real PXE ROM has none. A distribution point can answer a real client and still show "no PXE broadcast answer" in the script. If the script's 4011 and TFTP stages pass and a real client on that subnet boots, treat a broadcast-only warning as a false alarm.
+
+**Check the network path:**
+
+- The router's IP helper (DHCP relay) for the subnet points to the DHCP server, and to the PXE-enabled distribution point if the PXE responder relies on the relay.
+- UDP 67, 68, 4011 and 69 are not blocked between the subnet and the distribution point, including by the distribution point's own firewall.
+- The DHCP scope is active and has free addresses.
+- DHCP options 060, 066 and 067 are not set on the scope. The Configuration Manager PXE Responder does not support them, and they can override its answer.
+
+**Check the server:**
+
+- The PXE Responder service (SccmPxe) is running on the distribution point.
+- `SMSPXE.log` on the distribution point. Search for the device's MAC address around the time of the failure. A `Packet from` line means the request arrived, and the lines after it give the reason if no reply was sent (for example, the device is unknown or has no deployment). No line means the request never reached the server.
+
+## Step 8: Escalate to the EEA team
+
+Create an Incident ticket for the EEA team for a single-device failure, or for any failure after the boot image loads. Include:
+
+- What troubleshooting has been done, and the result of each step.
+- The exact error text and code, and the step it happened at. A photo of the screen is best.
+- Device model and serial number, MAC address, and BIOS version.
+- Site, VLAN or subnet, switch port, and the time of the failure.
+- Whether other devices at the site PXE boot (see "Who owns the problem").
+- The setup used: network via dock (give the dock model), via USB dongle, image run via PXE boot, via USB boot, or via full USB.
+- The `smsts.log` file, if the task sequence started. Copy it before you reboot, because in Windows PE the `X:` drive is lost on restart. See the knowledge base article "Troubleshooting for Windows 11 Image installation" (KB0010380) for how to get to a command prompt (F8) and copy the file.
+
+**Where to find `smsts.log`**
+
+| When the error happens | Location |
+| --- | --- |
+| Windows PE, before disk format | `X:\Windows\Temp\SMSTSLog\smsts.log` |
+| Windows PE, after disk format | `X:\SMSTSLog\smsts.log`, copied to `C:\_SMSTaskSequence\Logs\SMSTSLog\smsts.log` |
+| Full Windows, before the agent installs | `C:\_SMSTaskSequence\Logs\SMSTSLog\smsts.log` |
+| Full Windows, after the agent installs | `C:\Windows\CCM\Logs\SMSTSLog\smsts.log` |
+| After the task sequence finishes | `C:\Windows\CCM\Logs\smsts.log` |
+
+The drive letter may not be `C:` if the device has more than one partition or disk. Use the largest local drive.
+
+Attach logs to the ticket only. They can contain computer and server names, so do not email them or post them in shared channels.
