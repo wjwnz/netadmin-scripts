@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.6.0   (2026-09-24)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.7.0   (2026-09-30)
 #
+#  1.7.0  Stage 1 now sends the DHCPDISCOVER to the subnet-directed broadcast of each active local
+#         interface (e.g. 10.40.96.255) as well as 255.255.255.255, using the same transaction ID.
+#         Duplicate replies are merged. Added -SkipDirectedBroadcast.
 #  1.6.0  Reworded PXE-server and DHCP-option recommendations for the Configuration Manager
 #         PXE Responder Service (no WDS role): dropped WDS from service-name references, and
 #         options 066/067 are now flagged HIGH as unsupported by the responder, not just redundant.
@@ -90,6 +93,10 @@
     the PXE server a relay-style DHCPDISCOVER directly (from UDP 67, with this PC as the relay address)
     to tell a broken router relay path apart from a PXE server problem.
 
+.PARAMETER SkipDirectedBroadcast
+    Only send the DHCPDISCOVER to 255.255.255.255. Normally it is also sent to the subnet-directed broadcast
+    address of every active local IPv4 interface (e.g. 10.40.96.255), which some routers/relays treat differently.
+
 .PARAMETER PassThru
     Return a result object as well as printing the report.
 
@@ -132,10 +139,11 @@ Param(
     [String]$OutputPath,
     [String]$ReportPath,
     [switch]$SkipRelayTest,
+    [switch]$SkipDirectedBroadcast,
     [switch]$PassThru
 )
 
-$ScriptVersion = '1.6.0'
+$ScriptVersion = '1.7.0'
 $ErrorActionPreference = 'Stop'
 if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
 
@@ -161,6 +169,23 @@ function Get-LocalIPv4ForTarget([Net.IPAddress]$Target) {
     # Connecting a UDP socket sends nothing, but tells us which local IP routes to the target
     $s = New-Object Net.Sockets.Socket([Net.Sockets.AddressFamily]::InterNetwork, [Net.Sockets.SocketType]::Dgram, [Net.Sockets.ProtocolType]::Udp)
     try { $s.Connect($Target, 4011); $s.LocalEndPoint.Address } finally { $s.Close() }
+}
+
+function Get-LocalBroadcastAddresses {
+    # Subnet-directed broadcast address of each up, non-loopback, non-APIPA IPv4 interface address
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($nic in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($nic.OperationalStatus -ne 'Up' -or $nic.NetworkInterfaceType -in 'Loopback', 'Tunnel') { continue }
+        foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+            if ($ua.Address.AddressFamily -ne 'InterNetwork' -or $ua.Address.ToString().StartsWith('169.254.')) { continue }
+            try { $mask = $ua.IPv4Mask.GetAddressBytes() } catch { continue }
+            if (-not $mask) { continue }
+            $ip = $ua.Address.GetAddressBytes()
+            $bc = for ($i = 0; $i -lt 4; $i++) { [byte](($ip[$i] -band $mask[$i]) -bor (-bnot $mask[$i] -band 0xFF)) }
+            $list.Add([pscustomobject]@{ Interface = $nic.Name; Local = $ua.Address.ToString(); Broadcast = [Net.IPAddress]::new([byte[]]$bc) })
+        }
+    }
+    $list.ToArray()
 }
 
 function Get-IPString([byte[]]$b, [int]$o) { '{0}.{1}.{2}.{3}' -f $b[$o], $b[$o + 1], $b[$o + 2], $b[$o + 3] }
@@ -569,7 +594,18 @@ else {
         $xid = New-Object byte[] 4; (New-Object Random).NextBytes($xid)
         $discover = New-DhcpPacket -MessageType 1 -Xid $xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast
         [void]$sock.SendTo($discover, (New-Object Net.IPEndPoint([Net.IPAddress]::Broadcast, 67)))
+        $sentTo = @('255.255.255.255')
+        if (-not $SkipDirectedBroadcast) {
+            # Same packet (same XID) to each local subnet's directed broadcast, e.g. 10.40.96.255
+            foreach ($bc in @(Get-LocalBroadcastAddresses)) {
+                try { [void]$sock.SendTo($discover, (New-Object Net.IPEndPoint($bc.Broadcast, 67))); $sentTo += "$($bc.Broadcast) ($($bc.Local))" }
+                catch { Write-Host "  Could not send to directed broadcast $($bc.Broadcast): $($_.Exception.Message)" -ForegroundColor Yellow }
+            }
+        }
+        Write-Host "  DISCOVER sent to: $($sentTo -join ', ')"
         $offers = @(Receive-DhcpReplies -Socket $sock -Xid $xid -TimeoutSeconds $DiscoverTimeout)
+        # A server reached by both broadcasts answers twice: keep the first reply of each kind
+        $offers = @($offers | Group-Object { '{0}|{1}|{2}|{3}' -f $_.SourceIP, $_.ServerIdentifier, $_.YIAddr, $_.MessageType } | ForEach-Object { $_.Group[0] })
 
         foreach ($o in $offers) {
             $isPxe = $o.VendorClass -like 'PXEClient*'
