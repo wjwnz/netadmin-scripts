@@ -1,7 +1,15 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.8.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.9.0   (2026-10-01)
 #
+#  1.9.0  The UDP 4011 PXE request is now retried: -PxeRequestCount (default 2) requests, each waiting
+#         -PxeTimeout seconds (default 15) for the reply. The retries reuse one transaction ID, like a
+#         real PXE ROM, so a late reply to an earlier request is still accepted. Previously it was a
+#         fixed 2 requests sharing -DiscoverTimeout (4 s). The output shows which request was answered.
+#  1.8.1  Relay test is skipped when the PXE server is on this PC's own subnet (no relay is involved,
+#         so a 'FAIL' was meaningless). If the PXE server is on this subnet and answers on UDP 4011 but
+#         not the broadcast, that is now a LOW note (this script's DISCOVER comes from a PC that has an
+#         IP address, unlike a real PXE ROM, so real clients may still work) instead of HIGH.
 #  1.8.0  MAC and GUID now default to this computer's: the MAC of the active physical Ethernet adapter
 #         and the SMBIOS UUID, so the PXE server sees a real, known device. -MacAddressString and
 #         -UUIDString still override. Falls back to the old dummy values (with a warning) if not found.
@@ -63,6 +71,14 @@
 .PARAMETER DiscoverTimeout
     Seconds to wait for offers / ACKs. Increase if the DP has a PXE response delay configured.
 
+.PARAMETER PxeRequestCount
+    How many times to send the PXE request to UDP 4011 on each PXE server before giving up (default 2).
+    Sending stops at the first reply. Each request waits -PxeTimeout seconds.
+
+.PARAMETER PxeTimeout
+    Seconds to wait for the reply to each PXE request on UDP 4011 (default 15). The DHCP DISCOVER
+    wait is set separately by -DiscoverTimeout.
+
 .PARAMETER PxeServer
     Also send the 4011 request to this server even if it didn't answer the DISCOVER.
 
@@ -97,7 +113,8 @@
 .PARAMETER SkipRelayTest
     Don't run the relay test. Normally, if no PXE server answers the relayed broadcast, the script sends
     the PXE server a relay-style DHCPDISCOVER directly (from UDP 67, with this PC as the relay address)
-    to tell a broken router relay path apart from a PXE server problem.
+    to tell a broken router relay path apart from a PXE server problem. The test is skipped automatically
+    when the PXE server is on the same subnet as this PC, because no relay is involved there.
 
 .PARAMETER SkipDirectedBroadcast
     Only send the DHCPDISCOVER to 255.255.255.255. Normally it is also sent to the subnet-directed broadcast
@@ -132,6 +149,8 @@ Param(
     [ValidateRange(0, 65535)][int]$ProcessorArchitecture = 7,
     [String]$Option60String,
     [int]$DiscoverTimeout = 4,
+    [ValidateRange(1, 20)][int]$PxeRequestCount = 2,
+    [ValidateRange(1, 300)][int]$PxeTimeout = 15,
     [String]$PxeServer,
     [String]$TftpServer,
     [String]$BootFile,
@@ -149,7 +168,7 @@ Param(
     [switch]$PassThru
 )
 
-$ScriptVersion = '1.8.0'
+$ScriptVersion = '1.9.0'
 $ErrorActionPreference = 'Stop'
 if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
 
@@ -357,12 +376,19 @@ function Receive-DhcpReplies {
 function Invoke-PxeRequest([Net.Sockets.Socket]$Socket, [Net.IPAddress]$ServerIP) {
     # DHCPREQUEST to UDP 4011, as a PXE ROM does after a ProxyDHCP offer (uses script-level MAC/GUID/arch)
     $localIP = Get-LocalIPv4ForTarget $ServerIP
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $xid2 = New-Object byte[] 4; (New-Object Random).NextBytes($xid2)
-        $req = New-DhcpPacket -MessageType 3 -Xid $xid2 -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -ClientIP $localIP
+    # One transaction ID for every request, as a PXE ROM retransmits, so a late reply to an earlier request still matches
+    $xid2 = New-Object byte[] 4; (New-Object Random).NextBytes($xid2)
+    $req = New-DhcpPacket -MessageType 3 -Xid $xid2 -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -ClientIP $localIP
+    for ($attempt = 1; $attempt -le $PxeRequestCount; $attempt++) {
         [void]$Socket.SendTo($req, (New-Object Net.IPEndPoint($ServerIP, 4011)))
-        $ack = @(Receive-DhcpReplies -Socket $Socket -Xid $xid2 -TimeoutSeconds $DiscoverTimeout -FirstOnly) | Select-Object -First 1
-        if ($ack) { return $ack }
+        $ack = @(Receive-DhcpReplies -Socket $Socket -Xid $xid2 -TimeoutSeconds $PxeTimeout -FirstOnly) | Select-Object -First 1
+        if ($ack) {
+            $ack | Add-Member NoteProperty Attempt $attempt
+            return $ack
+        }
+        if ($attempt -lt $PxeRequestCount) {
+            Write-Host ("  {0,-15} no reply to PXE request {1} of {2} after {3} s - sending again" -f $ServerIP, $attempt, $PxeRequestCount, $PxeTimeout) -ForegroundColor Yellow
+        }
     }
     $null
 }
@@ -701,7 +727,7 @@ else {
         }
 
         # ---------------------------------------------------------- Stage 2: PXE (port 4011)
-        Write-Stage "Stage 2 - PXE boot server request (UDP 4011)"
+        Write-Stage "Stage 2 - PXE boot server request (UDP 4011, up to $PxeRequestCount request(s) x $PxeTimeout s)"
 
         $pxeTargets = New-Object System.Collections.Generic.List[object]
         $seen = @{}
@@ -729,7 +755,10 @@ else {
         foreach ($t in $pxeTargets) {
             # Relay test - only needed when nothing answered the (relayed) broadcast
             $relay = $null
-            if ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest) {
+            if ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest -and (Test-InSubnet $t.Ip $sub)) {
+                Write-Host "  Relay test to $($t.Ip) skipped: it is on this PC's own subnet, so no relay is involved." -ForegroundColor DarkGray
+            }
+            elseif ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest) {
                 $relay = Invoke-RelayDiscover ([Net.IPAddress]::Parse($t.Ip))
                 if (-not $relay.Ran) { Write-Host "  Relay test to $($t.Ip) skipped: $($relay.Note)" -ForegroundColor Yellow }
                 elseif ($relay.Answered) { Write-Host ("  [{0,5} ms] {1,-15} relay test: answered a relay-style DISCOVER sent directly ({2})" -f $relay.Offer.ElapsedMs, $t.Ip, $relay.Note) -ForegroundColor Green }
@@ -741,12 +770,13 @@ else {
             if ($ack) {
                 $file = Get-BootFile $ack
                 $next = if ($ack.SIAddr -ne '0.0.0.0') { $ack.SIAddr } elseif ($ack.TftpServerName) { $ack.TftpServerName } else { $t.Ip }
-                Write-Host ("  [{0,5} ms] {1,-15} ({2}) -> BootFile='{3}' NextSrv={4}" -f $ack.ElapsedMs, $t.Ip, $t.How, $file, $next)
+                $tryText = if ($ack.Attempt -gt 1) { " [request $($ack.Attempt) of $PxeRequestCount]" } else { '' }
+                Write-Host ("  [{0,5} ms] {1,-15} ({2}) -> BootFile='{3}' NextSrv={4}{5}" -f $ack.ElapsedMs, $t.Ip, $t.How, $file, $next, $tryText)
                 $extra = ($ack.Options.Keys | Where-Object { $_ -in 43, 243, 250, 252 } | Sort-Object) -join ','
                 if ($extra) { Write-Verbose "  ACK carried vendor/WDS options: $extra" }
             }
             else {
-                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011" -f $t.Ip, $t.How) -ForegroundColor Yellow
+                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 ({2} request(s), {3} s each)" -f $t.Ip, $t.How, $PxeRequestCount, $PxeTimeout) -ForegroundColor Yellow
             }
             $pxeChecks.Add([pscustomobject]@{
                 Server = $t.Ip; FoundVia = $t.How; Answered = [bool]$ack; BootFile = $file; NextServer = $next; Ack = $ack
@@ -757,7 +787,7 @@ else {
                 else { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer a relay-style DISCOVER sent directly" }
             }
 
-            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011" }
+            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($PxeRequestCount request(s), $PxeTimeout s each)" }
             elseif (-not $file) { Add-Result 'PXE' 'FAIL' "$($t.Ip) answered but gave no boot file" }
             elseif ($file -match 'abortpxe') {
                 Add-Result 'PXE' 'WARN' "$($t.Ip) returned '$file' - no deployment available for this MAC/GUID"
@@ -861,10 +891,15 @@ if (-not $TftpOnly) {
         $gwName = if ($sub -and $sub.Gateway) { $sub.Gateway } else { "the router" }
         $alongside = if ($dhcpSrv) { " as well as the DHCP server ($dhcpSrv)" } else { '' }
         $when = $runStart.ToString('HH:mm:ss')
-        if ($pxeIp -and (Test-InSubnet $pxeIp $sub)) {
+        if ($pxeIp -and (Test-InSubnet $pxeIp $sub) -and $chk -and $chk.Answered) {
+            Add-Action 'LOW' "PXE server $pxeIp" `
+                "If a real PXE client on this subnet boots, no action is needed. Otherwise check SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText, and that this PC's firewall allows inbound UDP 68 (run the script again with a rule allowing it for powershell.exe)." `
+                "$pxeIp is on this subnet and answered on UDP 4011, but sent no reply to this script's broadcast DISCOVER. That can be a false alarm: a real PXE ROM sends from IP 0.0.0.0, while this script sends from a PC that already has an address, which the PXE Responder may ignore."
+        }
+        elseif ($pxeIp -and (Test-InSubnet $pxeIp $sub)) {
             Add-Action 'HIGH' "PXE server $pxeIp" `
                 "Check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log." `
-                "$pxeIp is on this subnet but didn't answer the PXE broadcast."
+                "$pxeIp is on this subnet but didn't answer the PXE broadcast or the request on UDP 4011."
         }
         elseif ($pxeIp -and $chk -and $chk.RelayAnswered) {
             $ipHelperAction = $true
