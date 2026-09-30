@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.7.0   (2026-09-30)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.8.0   (2026-10-01)
 #
+#  1.8.0  MAC and GUID now default to this computer's: the MAC of the active physical Ethernet adapter
+#         and the SMBIOS UUID, so the PXE server sees a real, known device. -MacAddressString and
+#         -UUIDString still override. Falls back to the old dummy values (with a warning) if not found.
 #  1.7.0  Stage 1 now sends the DHCPDISCOVER to the subnet-directed broadcast of each active local
 #         interface (e.g. 10.40.96.255) as well as 255.255.255.255, using the same transaction ID.
 #         Duplicate replies are merged. Added -SkipDirectedBroadcast.
@@ -44,9 +47,12 @@
 .PARAMETER MacAddressString
     MAC address to present. For SCCM this must be a known device with a PXE deployment,
     or unknown computer support must be enabled on the DP.
+    Default: the MAC of this computer's active physical Ethernet adapter (the one with the default
+    route if there are several; Wi-Fi, virtual and VPN adapters are ignored).
 
 .PARAMETER UUIDString
     SMBIOS GUID to present (option 97).
+    Default: this computer's SMBIOS UUID (Win32_ComputerSystemProduct).
 
 .PARAMETER ProcessorArchitecture
     Option 93 client architecture: 0 = BIOS x86/x64, 6 = UEFI x86, 7 = UEFI x64, 9 = EFI BC.
@@ -121,8 +127,8 @@
 
 [CmdletBinding()]
 Param(
-    [String]$MacAddressString = "AA:BB:CC:DD:EE:FF",
-    [String]$UUIDString = "AABBCCDD-AABB-AABB-AABB-AABBCCDDEEFF",
+    [String]$MacAddressString,
+    [String]$UUIDString,
     [ValidateRange(0, 65535)][int]$ProcessorArchitecture = 7,
     [String]$Option60String,
     [int]$DiscoverTimeout = 4,
@@ -143,7 +149,7 @@ Param(
     [switch]$PassThru
 )
 
-$ScriptVersion = '1.7.0'
+$ScriptVersion = '1.8.0'
 $ErrorActionPreference = 'Stop'
 if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
 
@@ -155,6 +161,35 @@ function ConvertTo-MacBytes([string]$Mac) {
     $bytes = New-Object byte[] 6
     for ($i = 0; $i -lt 6; $i++) { $bytes[$i] = [Convert]::ToByte($clean.Substring($i * 2, 2), 16) }
     , $bytes
+}
+
+function Get-LocalEthernetMac {
+    # MAC of the active physical Ethernet adapter: up, has an IPv4 address and gateway, not Wi-Fi/virtual/VPN.
+    # With several candidates, prefer the one that owns the default-route address.
+    $virtual = 'Virtual|VMware|VirtualBox|Hyper-V|vEthernet|TAP-|WAN Miniport|VPN|Bluetooth|Loopback|Npcap|Sophos|Fortinet|Cisco AnyConnect|Wintun|ZeroTier|Tailscale'
+    $cands = foreach ($nic in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($nic.OperationalStatus -ne 'Up' -or $nic.NetworkInterfaceType -notin 'Ethernet', 'GigabitEthernet') { continue }
+        if ($nic.Description -match $virtual -or $nic.Name -match 'vEthernet') { continue }
+        $props = $nic.GetIPProperties()
+        $ip = $props.UnicastAddresses | Where-Object { $_.Address.AddressFamily -eq 'InterNetwork' -and -not $_.Address.ToString().StartsWith('169.254.') } | Select-Object -First 1
+        if (-not $ip -or -not ($props.GatewayAddresses | Where-Object { $_.Address.AddressFamily -eq 'InterNetwork' -and $_.Address.ToString() -ne '0.0.0.0' })) { continue }
+        $mac = $nic.GetPhysicalAddress().ToString()
+        if ($mac.Length -ne 12) { continue }
+        [pscustomobject]@{ Name = $nic.Name; Ip = $ip.Address.ToString(); Mac = $mac }
+    }
+    $cands = @($cands)
+    if (-not $cands) { return $null }
+    $routeIp = try { (Get-LocalIPv4ForTarget ([Net.IPAddress]::Parse('1.1.1.1'))).ToString() } catch { $null }
+    $pick = $cands | Where-Object { $_.Ip -eq $routeIp } | Select-Object -First 1
+    if (-not $pick) { $pick = $cands[0] }
+    $pick
+}
+
+function Get-LocalSmbiosUuid {
+    # SMBIOS UUID as Windows reports it (same byte order a PXE ROM sends in option 97); $null if unusable
+    try { $u = (Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop).UUID } catch { return $null }
+    $g = [Guid]::Empty
+    if ($u -and [Guid]::TryParse($u, [ref]$g) -and $g -ne [Guid]::Empty -and $u -notmatch '^[Ff-]+$') { $g.ToString() } else { $null }
 }
 
 function Resolve-IPv4([string]$Name) {
@@ -562,6 +597,25 @@ function Test-InSubnet([string]$Ip, $Sub) {
 }
 
 $runStart = Get-Date
+$macNote = ''; $uuidNote = ''
+if (-not $MacAddressString) {
+    $eth = Get-LocalEthernetMac
+    if ($eth) { $MacAddressString = $eth.Mac; $macNote = "  (this PC: '$($eth.Name)', $($eth.Ip))" }
+    else {
+        $MacAddressString = 'AA:BB:CC:DD:EE:FF'
+        $macNote = '  (no active Ethernet adapter found - dummy value; use -MacAddressString)'
+        Write-Warning 'Could not find an active physical Ethernet adapter; using a dummy MAC. The PXE server will treat this as an unknown device.'
+    }
+}
+if (-not $UUIDString) {
+    $smbios = Get-LocalSmbiosUuid
+    if ($smbios) { $UUIDString = $smbios; $uuidNote = '  (this PC: SMBIOS UUID)' }
+    else {
+        $UUIDString = 'AABBCCDD-AABB-AABB-AABB-AABBCCDDEEFF'
+        $uuidNote = '  (SMBIOS UUID not available - dummy value; use -UUIDString)'
+        Write-Warning 'Could not read a valid SMBIOS UUID; using a dummy GUID. The PXE server will treat this as an unknown device.'
+    }
+}
 $macBytes = ConvertTo-MacBytes $MacAddressString
 $macText = ([BitConverter]::ToString($macBytes)) -replace '-', ':'
 $uuid = [Guid]::Parse($UUIDString)
@@ -573,8 +627,8 @@ $tftpTargets = New-Object System.Collections.Generic.List[object]
 $tftpResults = New-Object System.Collections.Generic.List[object]
 
 Write-Host "SCCM PXE boot chain test v$ScriptVersion - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') on $env:COMPUTERNAME" -ForegroundColor White
-Write-Host "  MAC  : $macText"
-Write-Host "  GUID : $uuid"
+Write-Host "  MAC  : $macText$macNote"
+Write-Host "  GUID : $uuid$uuidNote"
 Write-Host "  Arch : $ProcessorArchitecture  ($Option60String)"
 
 if ($TftpOnly) {
