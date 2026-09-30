@@ -7,6 +7,7 @@ usage, parameters and examples.
 | Script | Description |
 | --- | --- |
 | [`SCCM/DHCP-PXE-TFTP-Test.ps1`](SCCM/DHCP-PXE-TFTP-Test.ps1) | Tests the full SCCM / ConfigMgr PXE boot chain from a Windows client: DHCP discover, PXE boot server request (UDP 4011), TFTP download, and a report of recommended fixes for the subnet it's run from. |
+| [`SCCM/PXE-Boot-Troubleshooting-Guide.md`](SCCM/PXE-Boot-Troubleshooting-Guide.md) | Step-by-step guide for PXE boot and imaging failures: symptom and PXE error-code triage, who to contact for site-wide vs single-device failures, and what to collect for escalation. (A guide, not a script.) |
 
 ## Adding a new script
 
