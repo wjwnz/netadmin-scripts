@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.11.3   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.12.0   (2026-10-01)
 #
+#  1.12.0 Failures now name the equivalent PXE ROM error code (from Microsoft's 'Advanced troubleshooting for
+#         PXE boot issues'): PXE-E51 no offers, PXE-E52 only ProxyDHCP offers, PXE-E78 no PXE server,
+#         PXE-E55 no reply on UDP 4011, PXE-E53 no boot file, PXE-E32/E35/E36/E3B/T04 for TFTP failures.
 #  1.11.3 Option 55 (parameter request list) now matches the sample DHCPDISCOVER in Microsoft's 'PXE boot in
 #         Configuration Manager' article (an x64 BIOS client): 24 items, 1,2,3,5,6,11,12,13,15,16,17,18,43,
 #         54,60,67,128-135 (was 18 items, with 66 and 97 added and 2,5,11,12,13,16,17,18 missing). That list
@@ -194,7 +197,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.11.3'
+$ScriptVersion = '1.12.0'
 $ErrorActionPreference = 'Stop'
 
 function Show-Usage {
@@ -294,6 +297,17 @@ function Get-LocalBroadcastAddresses {
         }
     }
     $list.ToArray()
+}
+
+function Get-TftpPxeCode([string]$ErrorText) {
+    # The PXE ROM error code a TFTP failure corresponds to (TFTP error 1 = file not found, 2 = access violation)
+    if (-not $ErrorText) { return $null }
+    if ($ErrorText -match '^No response from')       { 'PXE-E32' }   # TFTP open timeout
+    elseif ($ErrorText -match '^Transfer stalled')   { 'PXE-E35' }   # TFTP read timeout
+    elseif ($ErrorText -match '^TFTP error 1 ')      { 'PXE-E3B' }   # file not found
+    elseif ($ErrorText -match '^TFTP error 2 ')      { 'PXE-T04' }   # access violation
+    elseif ($ErrorText -match '^TFTP error')         { 'PXE-E36' }   # error received from TFTP server
+    else { $null }
 }
 
 function Get-IPString([byte[]]$b, [int]$o) { '{0}.{1}.{2}.{3}' -f $b[$o], $b[$o + 1], $b[$o + 2], $b[$o + 3] }
@@ -772,10 +786,10 @@ else {
             Add-Result 'DHCP' 'PASS' ("{0} offer(s): {1}" -f $leaseOffers.Count, (($leaseOffers | ForEach-Object { "$($_.YIAddr) from $($_.ServerIdentifier)" }) -join ', '))
         }
         elseif ($offers.Count -gt 0) {
-            Add-Result 'DHCP' 'FAIL' 'Only ProxyDHCP replies - no DHCP server offered an address'
+            Add-Result 'DHCP' 'FAIL' 'Only ProxyDHCP replies - no DHCP server offered an address (PXE-E52)'
         }
         else {
-            Add-Result 'DHCP' 'FAIL' 'No offers received'
+            Add-Result 'DHCP' 'FAIL' 'No offers received (PXE-E51: no DHCP or proxyDHCP offers)'
         }
         if ($hasDhcpPxeOpts) {
             Add-Result 'DHCP' 'WARN' "DHCP hands out PXE boot options: 066/next-server='$dhcpNext' 067='$dhcpBootFile'"
@@ -804,7 +818,7 @@ else {
 
         if ($pxeTargets.Count -eq 0) {
             Write-Host "  No PXE server to query: nothing answered the PXE broadcast, DHCP doesn't name one, and -PxeServer wasn't given." -ForegroundColor Yellow
-            Add-Result 'PXE' 'FAIL' 'No PXE server found for this subnet'
+            Add-Result 'PXE' 'FAIL' 'No PXE server found for this subnet (PXE-E78: could not locate boot server)'
         }
 
         foreach ($t in $pxeTargets) {
@@ -833,7 +847,7 @@ else {
                 if ($extra) { Write-Verbose "  ACK carried vendor/WDS options: $extra" }
             }
             else {
-                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 after {2} request(s), {3:N1} s in total ({4} s per request)" -f $t.Ip, $t.How, $pxeReq.Requests, ($pxeReq.TotalMs / 1000), $PxeTimeout) -ForegroundColor Yellow
+                Write-Host ("  {0,-15} ({1}) -> no reply on UDP 4011 (PXE-E55) after {2} request(s), {3:N1} s in total ({4} s per request)" -f $t.Ip, $t.How, $pxeReq.Requests, ($pxeReq.TotalMs / 1000), $PxeTimeout) -ForegroundColor Yellow
             }
             $pxeChecks.Add([pscustomobject]@{
                 Server = $t.Ip; FoundVia = $t.How; Answered = [bool]$ack; BootFile = $file; NextServer = $next; Ack = $ack
@@ -845,8 +859,8 @@ else {
                 else { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer a relay-style DISCOVER sent directly" }
             }
 
-            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($($pxeReq.Requests) request(s), $([math]::Round($pxeReq.TotalMs / 1000, 1)) s in total)" }
-            elseif (-not $file) { Add-Result 'PXE' 'FAIL' "$($t.Ip) answered but gave no boot file" }
+            if (-not $ack) { Add-Result 'PXE' 'FAIL' "$($t.Ip) did not answer on UDP 4011 ($($pxeReq.Requests) request(s), $([math]::Round($pxeReq.TotalMs / 1000, 1)) s in total) (PXE-E55)" }
+            elseif (-not $file) { Add-Result 'PXE' 'FAIL' "$($t.Ip) answered but gave no boot file (PXE-E53)" }
             elseif ($file -match 'abortpxe') {
                 Add-Result 'PXE' 'WARN' "$($t.Ip) returned '$file' - no deployment available for this MAC/GUID"
                 $tftpTargets.Add([pscustomobject]@{ Server = $next; File = $file; Kind = 'PXE' })
@@ -911,8 +925,10 @@ foreach ($t in $tftpTargets) {
         Add-Result 'TFTP' $state ("{0} ({1}) - {2:N0} bytes, {3} MB/s, {4} timeouts, {5} out-of-order" -f $res.File, $kindText[$t.Kind], $res.Bytes, $res.ThroughputMBps, $res.Timeouts, $res.OutOfOrder)
     }
     else {
-        Write-Host "  FAIL $($res.Error)" -ForegroundColor Red
-        Add-Result 'TFTP' 'FAIL' "$($res.File) ($($kindText[$t.Kind])) from $($res.Server): $($res.Error)"
+        $tftpCode = Get-TftpPxeCode $res.Error
+        $codeText = if ($tftpCode) { " ($tftpCode)" } else { '' }
+        Write-Host "  FAIL $($res.Error)$codeText" -ForegroundColor Red
+        Add-Result 'TFTP' 'FAIL' "$($res.File) ($($kindText[$t.Kind])) from $($res.Server): $($res.Error)$codeText"
     }
 }
 
