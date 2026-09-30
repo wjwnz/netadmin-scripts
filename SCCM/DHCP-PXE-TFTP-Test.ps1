@@ -2,10 +2,11 @@
 # ==============================================================================
 #  DHCP-PXE-TFTP-Test.ps1   Version 1.11.3   (2026-10-01)
 #
-#  1.11.3 Option 55 (parameter request list) now matches a real PXE ROM captured on the wire: 24 items,
-#         1,2,3,5,6,11,12,13,15,16,17,18,43,54,60,67,128-135 (was 18 items, with 66 and 97 added and
-#         2,5,11,12,13,16,17,18 missing). A real ROM does not request option 66, so a DHCP server that
-#         only sends 66 when asked will no longer show it; 67 and next-server are still reported.
+#  1.11.3 Option 55 (parameter request list) now matches the sample DHCPDISCOVER in Microsoft's 'PXE boot in
+#         Configuration Manager' article (an x64 BIOS client): 24 items, 1,2,3,5,6,11,12,13,15,16,17,18,43,
+#         54,60,67,128-135 (was 18 items, with 66 and 97 added and 2,5,11,12,13,16,17,18 missing). That list
+#         does not request option 66, so a DHCP server that only sends 66 when asked will no longer show
+#         it; 67 and next-server are still reported. Not yet compared with a UEFI ROM's own capture.
 #  1.11.2 Default -DiscoverTimeout raised from 4 to 60 seconds (same as -PxeTimeout). The broadcast
 #         DISCOVER collects every offer, so Stage 1 now always takes the full -DiscoverTimeout.
 #  1.11.1 The relay-style DISCOVER now waits -PxeTimeout seconds (default 60) for the reply instead of
@@ -343,7 +344,7 @@ function New-DhcpPacket {
     $p.AddRange($hdr)
     $p.AddRange([byte[]](99, 130, 83, 99))              # magic cookie
     $p.AddRange([byte[]](53, 1, $MessageType))          # message type
-    # Same list, in the same order, as a real PXE ROM sends (24 items; note it does not ask for option 66)
+    # The 24-item list (and order) from the sample DHCPDISCOVER in Microsoft's PXE boot article; it does not ask for option 66
     $prl = [byte[]](1, 2, 3, 5, 6, 11, 12, 13, 15, 16, 17, 18, 43, 54, 60, 67, 128, 129, 130, 131, 132, 133, 134, 135)
     $p.Add(55); $p.Add([byte]$prl.Length); $p.AddRange($prl)
     $p.AddRange([byte[]](57, 2, 5, 192))                # max message size 1472
