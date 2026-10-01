@@ -1,0 +1,2 @@
+# Script output logs can contain computer names, MAC addresses and IP addresses
+*.log
