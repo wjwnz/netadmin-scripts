@@ -6,7 +6,6 @@ Use this guide when a device fails to PXE boot or fails during imaging. It is wr
 
 - **Scope:** UEFI PXE imaging of Windows 11 through Configuration Manager. BIOS settings are given for Dell systems only. The distribution points use the PXE responder without the WDS role, so Microsoft's WDS-specific steps do not apply.
 - **What good looks like:** the device shows "Start PXE over IPv4", then "WDS Boot Manager", then WinPE and the task sequence. If you reach WDS Boot Manager, PXE itself is working. The name "WDS Boot Manager" is normal even without the WDS role.
-- **PXE password:** open question. The distribution point requires a password when computers use PXE. State here when the prompt appears and where technicians get the password. Do not write the password in this guide.
 - **Owner and last review date:** to be added before publishing.
 
 ## Who does what
@@ -125,7 +124,7 @@ Resolution:
 
 ## Step 5: GNDS issues (GNDS 4 offices)
 
-**Who:** Desktop Support. (To confirm: whether Service Desk can also check GNDS.)
+**Who:** Desktop Support.
 
 Symptom: "No bootable device found". A DHCP timeout or a device stuck at "Start PXE over IPv4" can have the same cause, because an unregistered device gets no network access.
 
@@ -226,7 +225,7 @@ These checks are for the DHCP team, network team and SCCM Server Admins. Service
 
 - The device has a task sequence available for PXE: it is in a collection with a PXE-enabled deployment, or it is a new device covered by the All Unknown Computers deployment (unknown computer support is on for the distribution point). ConfigMgr's PXE server only answers a device that has a deployment available (SMSPXE.log: "no advertisements found" and "Not serviced").
 - The boot image is distributed to the distribution point and is set to deploy from the PXE-enabled distribution point.
-- If every device suddenly fails after a site recovery or move, check SMSPXE.log for an expired certificate (error 800B0101) and Distmgr.log for "Failed to get the encrypted PXE password". The distribution point requires a PXE password. The fix is to clear the PXE password setting temporarily, confirm the certificate updates, then set the password again.
+- If every device suddenly fails, check SMSPXE.log for certificate errors, such as error 800B0101 (a certificate is not within its validity period).
 - A distribution point with a self-signed certificate creates files under C:\ProgramData\Microsoft\Crypto\RSA\S-1-5-18 for every PXE request, including test runs and retries. Check the folder size and free disk space. Microsoft's article is for the 2012 product, so confirm it still applies.
 - If imaging is slow, test the boot image download speed: run the test script with -AdditionalTftpFiles pointing at the boot image WIM (for example SMSImages\<package ID>\boot.<package ID>.wim).
 
