@@ -119,7 +119,19 @@ Open question: does the USB boot still need the network and GNDS registration? S
 
 Use this step for site-wide failures, or when the device-side steps found nothing.
 
-**Run the PXE test script.** From a Windows PC on the same VLAN as the failing device, open an elevated PowerShell window and run `.\SCCM\DHCP-PXE-TFTP-Test.ps1` from the netadmin-scripts repo. Add `-PxeServer <DP IP>` to test a specific distribution point. Do not run it on the DHCP server or the distribution point itself. It checks DHCP offers, the PXE server on UDP 4011 and a TFTP download of the boot file, and lists recommended actions for the subnet.
+**Run the PXE test script.** From a Windows PC on the same VLAN as the failing device, open PowerShell and run the script (`DHCP-PXE-TFTP-Test.ps1`). Do not run it on the DHCP server or the distribution point itself. It checks DHCP offers, the PXE server on UDP 4011 and a TFTP download of the boot file, and lists recommended actions for the subnet. Outside the imaging VLAN, add `-PxeServer <DP IP>` to test a specific distribution point.
+
+**Using the script on the imaging VLAN**
+
+1. Copy the latest version of the script onto the computer before you start. The computer loses the corporate network on the imaging VLAN, so you cannot fetch it afterwards. The first line of the output shows the version.
+2. Add the computer's MAC address to "Imaging Workstations" in GNDS. The entry lasts 8 hours.
+3. Ask your DA to stop the "Wired AutoConfig" service on the computer.
+4. Disconnect and reconnect the network cable. Turn off Wi-Fi and disconnect any dock or second adapter.
+5. Check the computer has an IP address in the imaging VLAN.
+6. Run the script without `-PxeServer`. On the imaging VLAN it should find the PXE server from the broadcast, as a real client does.
+7. Check the `MAC :` line at the top shows this computer's Ethernet adapter and an imaging VLAN address. A dummy MAC means the script could not find the adapter.
+8. Start the "Wired AutoConfig" service again to return the computer to the corporate network.
+9. Attach the script output to the ticket.
 
 Read its result with care. The script sends its DISCOVER from a PC that already has an IP address, while a real PXE ROM has none, but it resends it at 4, 12 and 28 seconds as a ROM does, so a PXE server with a response delay still answers. If the script gets an answer to its direct test but no PXE offer to the broadcast, the router's IP helper is not forwarding to the PXE server. If it reports that the DHCP scope hands out options 066/067, fix that first, because it is a likely cause of "No bootable devices found". Run it from a PC on the same VLAN as the failing device, because DHCP options are set per scope.
 

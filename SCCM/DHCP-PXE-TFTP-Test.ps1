@@ -1,7 +1,9 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.14.1   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.14.2   (2026-10-01)
 #
+#  1.14.2 Help text and the port 68 error no longer say the script must be run elevated: it works from a normal
+#         PowerShell window. (If binding UDP 67/68 is refused on a locked-down PC, try elevated.)
 #  1.14.1 The DHCP/PXE requests now match a real Dell UEFI PXE ROM captured on the wire. Option 55 is the
 #         ROM's 35-item list, which ASKS FOR options 66 and 67 (v1.11.3 had switched to a 24-item sample
 #         from Microsoft's article that does not, so a DHCP scope handing out 066/067 was no longer
@@ -202,8 +204,8 @@
     .\DHCP-PXE-TFTP-Test.ps1 -MacAddressString 00-11-22-33-44-55 -UUIDString 4C4C4544-0000-1000-8000-000000000000 -ReportPath \\server\share\PXE-Results.csv
 
 .NOTES
-    - Run elevated, from a client on the subnet you want to test (not on the DHCP server or DP itself:
-      they already own UDP 67/68/4011).
+    - Run from a client on the subnet you want to test (not on the DHCP server or DP itself: they already own
+      UDP 67/68/4011). A normal PowerShell window is enough; if binding UDP 67/68 is refused, try elevated.
     - Local firewall must allow inbound UDP 68 and replies from the TFTP server.
     - Sends only DISCOVER (never REQUEST to the DHCP server), so no lease is consumed.
 #>
@@ -237,7 +239,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.14.1'
+$ScriptVersion = '1.14.2'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
@@ -901,7 +903,7 @@ else {
     Write-Stage "Stage 1 - DHCP DISCOVER (up to $stage1Window s$(if (-not $NoEarlyExit) { '; stops early once a DHCP and a PXE offer arrive' }))"
 
     try { $sock = New-UdpSocket -Port 68 }
-    catch { throw "Could not bind UDP port 68: $($_.Exception.Message). Run elevated, and not on a DHCP server or the PXE-enabled distribution point itself." }
+    catch { throw "Could not bind UDP port 68: $($_.Exception.Message). Don't run it on a DHCP server or the PXE-enabled distribution point itself (they own UDP 67/68/4011); on a locked-down PC, try an elevated window." }
 
     try {
         $xid = New-Object byte[] 4; (New-Object Random).NextBytes($xid)
