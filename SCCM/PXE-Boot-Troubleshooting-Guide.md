@@ -17,7 +17,7 @@ Find the on-screen symptom, then go to the step shown. If more than one device i
 | --- | --- | --- |
 | No link lights, "Media test failure" or "Media absent" | Cable, port, dock or adapter | Step 3 |
 | "Start PXE over IPv4" then times out, or `PXE-E51` (no DHCP or proxyDHCP offers received) or PXE-E52 (proxyDHCP offers received, no DHCP offers) | No DHCP offer: GNDS registration missing or expired, port not authorised, or a DHCP or network problem | Steps 5 and 3. If other devices also fail, it is site-wide. |
-| "No bootable device found" after PXE fails | Check GNDS for an IP address for the device. No IP: registration missing or expired, or wrong BIOS settings. Has an IP: the SCCM server is not replying in a timely fashion. | Step 5 (check GNDS first). No IP: Steps 5 and 2. Has an IP: Step 7 (SCCM Server Admins). |
+| "No bootable device found" after PXE fails | Check GNDS for an IP address for the device. No IP: registration missing or expired, or wrong BIOS settings. Has an IP: the boot information is wrong or late. Usual causes: DHCP options 066/067 on the scope, or a PXE response delay on the distribution point. | Step 5 (check GNDS first). No IP: Steps 5 and 2. Has an IP: Step 7 (SCCM Server Admins). |
 | `PXE-E53` (no boot filename received) or `PXE-E55` (proxyDHCP did not reply on port 4011), or PXE-E77 / PXE-E78 (bad or missing discovery server list, could not locate boot server) | PXE responder not answering: device unknown or no deployment, or a DHCP relay problem | One device: Step 8 (EEA). Several devices: Step 7 (SCCM Server Admins). |
 | `PXE-E32` (TFTP open timeout) or `PXE-E3B` (file not found), PXE-E35 (TFTP read timeout), PXE-E36 (error received from TFTP server), PXE-E3F (invalid TFTP packet size) or PXE-T04 (access violation) | TFTP blocked on the network, or boot file not available | Step 7 (SCCM Server Admins and network team) |
 | "Operating system loader has no signature" | Secure Boot certificate, old BIOS, or boot image not signed for Secure Boot | Step 4 |
@@ -35,7 +35,7 @@ Decide first whether it is one device or the whole site: try a known-good device
 
 If the cause is a network link problem at the site, such as no link or 802.1x not authorising ports, tell the network team as well.
 
-**Exception:** if the error is "No bootable device found" and GNDS shows the device has an IP address, the SCCM server is not replying in a timely fashion. Contact the **SCCM Server Admins**, even for a single device (see Step 5).
+**Exception:** if the error is "No bootable device found" and GNDS shows the device has an IP address, the boot information is wrong or late (DHCP options 066/067 on the scope, or a PXE response delay on the distribution point). Contact the **SCCM Server Admins**, even for a single device (see Step 5).
 
 ## Step 1: Verify prerequisites
 
@@ -100,7 +100,7 @@ Symptom: "No bootable device found". A DHCP timeout or a device stuck at "Start 
 
 **First, check GNDS for an IP address for the device.**
 
-- **The device has an IP address:** the network and GNDS registration are fine, so the SCCM server is not replying in a timely fashion. Log a ticket for the SCCM Server Admins (Step 7). Include the device's IP from GNDS, its MAC address and the time of the attempt.
+- **The device has an IP address:** the network and GNDS registration are fine, so the problem is the boot information, not the network. Usual causes: the DHCP scope hands out options 066/067 with a boot file path the distribution point does not have, or the distribution point has a PXE response delay so its correct offer arrives too late. Log a ticket for the SCCM Server Admins (Step 7). Include the device's IP from GNDS, its MAC address and the time of the attempt.
 - **The device has no IP address:** work through the checks below.
 
 If the device has no IP address, check:
@@ -121,18 +121,19 @@ Use this step for site-wide failures, or when the device-side steps found nothin
 
 **Run the PXE test script.** From a Windows PC on the same VLAN as the failing device, open an elevated PowerShell window and run `.\SCCM\DHCP-PXE-TFTP-Test.ps1` from the netadmin-scripts repo. Add `-PxeServer <DP IP>` to test a specific distribution point. Do not run it on the DHCP server or the distribution point itself. It checks DHCP offers, the PXE server on UDP 4011 and a TFTP download of the boot file, and lists recommended actions for the subnet.
 
-Read its result with care: the script's broadcast discovery comes from a PC that already has an IP address, while a real PXE ROM has none. A distribution point can answer a real client and still show "no PXE broadcast answer" in the script. If the script's 4011 and TFTP stages pass and a real client on that subnet boots, treat a broadcast-only warning as a false alarm.
+Read its result with care. The script sends its DISCOVER from a PC that already has an IP address, while a real PXE ROM has none, but it resends it at 4, 12 and 28 seconds as a ROM does, so a PXE server with a response delay still answers. If the script gets an answer to its direct test but no PXE offer to the broadcast, the router's IP helper is not forwarding to the PXE server. If it reports that the DHCP scope hands out options 066/067, fix that first, because it is a likely cause of "No bootable devices found". Run it from a PC on the same VLAN as the failing device, because DHCP options are set per scope.
 
 **Check the network path:**
 
 - The router's IP helper (DHCP relay) for the subnet points to the DHCP server, and to the PXE-enabled distribution point if the PXE responder relies on the relay.
 - UDP 67, 68, 4011 and 69 are not blocked between the subnet and the distribution point, including by the distribution point's own firewall.
 - The DHCP scope is active and has free addresses.
-- DHCP options 060, 066 and 067 are not set on the scope. The Configuration Manager PXE Responder does not support them, and they can override its answer.
+- DHCP options 060, 066 and 067 are not set on the scope. The Configuration Manager PXE Responder does not support them, and they can override its answer: a client that takes the boot file from DHCP asks the distribution point for a path it does not have, and ends at "No bootable devices found". Check the scope that serves the failing VLAN, including any vendor-class policy for PXEClient (for example, `Get-DhcpServerv4OptionValue -ComputerName <DHCP server> -ScopeId <scope> -All`).
 
 **Check the server:**
 
 - The PXE Responder service (SccmPxe) is running on the distribution point.
+- The PXE response delay in the distribution point's properties (PXE tab) is 0. With a delay, the PXE server ignores a client's early DISCOVERs (SMSPXE.log: "Response delay is 10. Ignoring request."). A PXE ROM waits only about 3 seconds before it uses the boot file from the DHCP offer, so the client can end at "No bootable devices found".
 - `SMSPXE.log` on the distribution point. Search for the device's MAC address around the time of the failure. A `Packet from` line means the request arrived, and the lines after it give the reason if no reply was sent (for example, the device is unknown or has no deployment). No line means the request never reached the server.
 
 ## Step 8: Escalate to the EEA team
