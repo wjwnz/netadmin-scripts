@@ -165,7 +165,7 @@ Use this step for site-wide failures, or when the device-side steps found nothin
 6. Run the script without `-PxeServer`. On the imaging VLAN it should find the PXE server from the broadcast, as a real client does.
 7. Check the `MAC :` line at the top shows this computer's Ethernet adapter and an imaging VLAN address. A dummy MAC means the script could not find the adapter.
 8. Start the "Wired AutoConfig" service again to return the computer to the corporate network.
-9. Attach the script output to the ticket.
+9. Attach the log file the script saved in the folder you ran it from (`DHCP-PXE-TFTP-Test_<computer>_<date time>.log`) to the ticket.
 
 **Example: a successful test on the imaging VLAN** (key lines only; names, addresses and IDs replaced)
 

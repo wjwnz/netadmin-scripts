@@ -1,7 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.15.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.16.0   (2026-10-01)
 #
+#  1.16.0 Everything shown on the console is also written to a log file named
+#         DHCP-PXE-TFTP-Test_<computer>_<yyyyMMdd-HHmmss>.log in the folder the script is run from (the current
+#         folder). -LogPath sets a different folder or file; -NoLog turns logging off. If the log cannot be
+#         written (no write access), the script still runs and shows an error at the end.
 #  1.15.0 TFTP defaults now match a real Dell UEFI PXE ROM: block size 1468 (was 1456) and window size 4 (was 1),
 #         so the throughput the script reports is closer to what a real client gets. Use -TftpWindowSize 1
 #         for classic lock-step TFTP, or -TftpBlockSize 1456 for the old size.
@@ -192,6 +196,15 @@
     Always wait the full -DiscoverTimeout in Stage 1. Normally Stage 1 stops once a DHCP offer and a PXE offer
     have arrived (plus 1.5 s for other servers), or 3 s after the PXE server answers the relay-style DISCOVER.
 
+.PARAMETER LogPath
+    Where to save the log of the console output. A folder gets a file named
+    DHCP-PXE-TFTP-Test_<computer>_<yyyyMMdd-HHmmss>.log; a path with a file extension is used as the log file
+    (appended to). Default: the folder the script is run from (the current folder).
+
+.PARAMETER NoLog
+    Don't write a log file. Without it, everything shown on the console is also saved to a log file. If the log
+    cannot be written (for example no write access to the folder), the script still runs and shows an error at the end.
+
 .PARAMETER PassThru
     Return a result object as well as printing the report.
 
@@ -239,11 +252,13 @@ Param(
     [switch]$SkipDirectedBroadcast,
     [switch]$NoDiscoverResend,
     [switch]$NoEarlyExit,
+    [String]$LogPath,
+    [switch]$NoLog,
     [switch]$PassThru,
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.15.0'
+$ScriptVersion = '1.16.0'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
@@ -274,6 +289,74 @@ function Show-Usage {
 }
 
 if ($Help) { Show-Usage; return }
+
+# ---------------------------------------------------------- Logging
+# Everything the script shows on the console is also appended to a log file. Write-Host and Write-Warning are
+# wrapped so every call is logged; a log that cannot be written never stops the script, the problem is shown at the end.
+$script:LogFile = $null
+$script:LogError = $null
+
+function Write-LogLine([string]$Text) {
+    if (-not $script:LogFile) { return }
+    try { Add-Content -LiteralPath $script:LogFile -Value $Text -Encoding UTF8 -ErrorAction Stop }
+    catch { $script:LogError = "Could not write to the log file '$($script:LogFile)': $($_.Exception.Message)"; $script:LogFile = $null }
+}
+
+function Write-Host {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, ValueFromRemainingArguments = $true)][object[]]$Object,
+        [object]$Separator,
+        [ConsoleColor]$ForegroundColor,
+        [ConsoleColor]$BackgroundColor,
+        [switch]$NoNewline
+    )
+    $sep = if ($PSBoundParameters.ContainsKey('Separator')) { [string]$Separator } else { ' ' }
+    Write-LogLine (($Object | ForEach-Object { "$_" }) -join $sep)
+    Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+}
+
+function Write-Warning {
+    [CmdletBinding()]
+    param([Parameter(Position = 0, Mandatory = $true)][AllowEmptyString()][string]$Message)
+    Write-LogLine "WARNING: $Message"
+    Microsoft.PowerShell.Utility\Write-Warning @PSBoundParameters
+}
+
+function Write-LogSummary {
+    # Last thing printed: where the log went, or why it could not be written (not logged itself)
+    if ($script:LogFile) { Write-Host "  Log saved to $($script:LogFile)" -ForegroundColor DarkGray }
+    elseif ($script:LogError) {
+        Microsoft.PowerShell.Utility\Write-Host ""
+        Microsoft.PowerShell.Utility\Write-Host "  ERROR: $($script:LogError) The output above was not saved to a log file." -ForegroundColor Red
+    }
+}
+
+if (-not $NoLog) {
+    $logName = 'DHCP-PXE-TFTP-Test_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $logTarget = $null
+    try {
+        $logTarget = if (-not $LogPath) { Join-Path (Get-Location).Path $logName }
+                     elseif ([IO.Path]::HasExtension($LogPath)) { $LogPath }
+                     else { Join-Path $LogPath $logName }
+        $logTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($logTarget)
+        $logDir = Split-Path -Path $logTarget -Parent
+        if ($logDir -and -not (Test-Path -LiteralPath $logDir)) { [void](New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop) }
+        [IO.File]::AppendAllText($logTarget, '')      # create it now so a permissions problem shows up here
+        $script:LogFile = $logTarget
+    }
+    catch {
+        $where = if ($logTarget) { $logTarget } else { 'the current folder' }
+        $script:LogError = "Could not create the log file at '$where': $($_.Exception.Message)"
+    }
+}
+
+# A terminating error is written to the log too, and the log problem (if any) is still reported
+trap {
+    Write-LogLine ("ERROR: " + $_.Exception.Message)
+    Write-LogSummary
+    break
+}
 
 # Name and version first, before anything else can print
 Write-Host "SCCM PXE boot chain test v$ScriptVersion - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') on $env:COMPUTERNAME" -ForegroundColor White
@@ -1308,6 +1391,7 @@ if ($ReportPath) {
     catch { Write-Host "  Could not write report to ${ReportPath}: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 Write-Host ""
+Write-LogSummary
 
 if ($PassThru) {
     [pscustomobject]@{
