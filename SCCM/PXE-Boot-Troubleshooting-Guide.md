@@ -150,11 +150,11 @@ SCCM PXE boot chain test v1.14.1 - <date time> on <COMPUTER>
 
 How to read it:
 
-- Stage 1 finished with both a DHCP offer (142 ms) and a ProxyDHCP/PXE offer from the PXE server. The PXE offer arrived late, at 13.4 s.
+- Stage 1 finished with both a DHCP offer (142 ms) and a ProxyDHCP/PXE offer from the PXE server. The PXE offer arrived late, at 13.4 s. This is expected: the PXE response delay on the distribution point is set to 10 seconds by design.
 - Stage 2: the PXE server returned the boot file in 1154 ms.
 - Stage 3: TFTP downloaded 1,171,224 bytes with 0 timeouts.
-- Summary: DHCP, PXE and TFTP all PASS. The one recommended action is LOW: the late offer means the PXE server probably has a PXE response delay. A real client waits that long before PXE starts, so set the delay to 0 on the distribution point if it is not deliberate.
-- The script reported no DHCP options 066/067, so this scope is not handing out a boot file.
+- Summary: DHCP, PXE and TFTP all PASS. The one recommended action is LOW and can be ignored here: it is the PXE response delay, which is set to 10 seconds by design. Setting it to 0 is being tested.
+- The script reported no DHCP options 066/067, so this scope is not handing out a boot file. This run was taken after options 066/067 were removed from the scope.
 
 Read its result with care. The script sends its DISCOVER from a PC that already has an IP address, while a real PXE ROM has none, but it resends it at 4, 12 and 28 seconds as a ROM does, so a PXE server with a response delay still answers. If the script gets an answer to its direct test but no PXE offer to the broadcast, the router's IP helper is not forwarding to the PXE server. If it reports that the DHCP scope hands out options 066/067, fix that first, because it is a likely cause of "No bootable devices found". Run it from a PC on the same VLAN as the failing device, because DHCP options are set per scope.
 
@@ -168,7 +168,7 @@ Read its result with care. The script sends its DISCOVER from a PC that already 
 **Check the server:**
 
 - The PXE Responder service (SccmPxe) is running on the distribution point.
-- The PXE response delay in the distribution point's properties (PXE tab) is 0. With a delay, the PXE server ignores a client's early DISCOVERs (SMSPXE.log: "Response delay is 10. Ignoring request."). A PXE ROM waits only about 3 seconds before it uses the boot file from the DHCP offer, so the client can end at "No bootable devices found".
+- The PXE response delay in the distribution point's properties (PXE tab) is set by design (currently 10 seconds; setting it to 0 is being tested). With a delay, the PXE server ignores a client's early DISCOVERs (SMSPXE.log: "Response delay is 10. Ignoring request."). A PXE ROM waits only about 3 seconds before it uses the boot file from the DHCP offer, so if DHCP options 066/067 are also set, the client can end at "No bootable devices found".
 - `SMSPXE.log` on the distribution point. Search for the device's MAC address around the time of the failure. A `Packet from` line means the request arrived, and the lines after it give the reason if no reply was sent (for example, the device is unknown or has no deployment). No line means the request never reached the server.
 
 ## Step 8: Escalate to the EEA team
