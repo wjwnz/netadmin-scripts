@@ -1,7 +1,20 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.13.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.14.0   (2026-10-01)
 #
+#  1.14.0 Shorter runs. Stage 1 now stops as soon as it has what it needs: a DHCP offer and a PXE offer
+#         (1.5 s grace for other servers), or, when -PxeServer is given, 3 s after the PXE server answers
+#         the relay-style DISCOVER (a forwarded broadcast would have been answered by then). The
+#         relay-style DISCOVER now runs at the same time as the broadcast DISCOVER when -PxeServer is
+#         given, instead of after it. Waits are capped at the last resend + 5 s (33 s), since nothing is
+#         sent after that. Added -NoEarlyExit for the old full-length wait. Typical run: a few seconds,
+#         or about 15 s when the PXE server has a 10 s response delay.
+#  1.13.2 Default -DiscoverTimeout set to 40 seconds (was 10) so every DISCOVER resend (4, 12 and 28 s)
+#         and its reply fits in the wait, including a PXE server with a response delay of about 10 s.
+#  1.13.1 Default -DiscoverTimeout (the broadcast DHCP DISCOVER wait) lowered from 60 to 10 seconds.
+#         -PxeTimeout (4011 request and relay-style DISCOVER) stays at 60. With 10 s only the DISCOVER
+#         resend at 4 s happens, so a PXE server with a response delay of about 10 s will not show a
+#         ProxyDHCP offer; a note is printed. Use -DiscoverTimeout 20 or more to see it.
 #  1.13.0 DHCPDISCOVERs are now resent like a PXE ROM does (same transaction ID, at 4, 12 and 28 s, with the
 #         'seconds elapsed' field set to the time since the first one). A ConfigMgr PXE server with a PXE
 #         response delay (SMSPXE.log: 'Client time since boot is 4. Response delay is 10. Ignoring
@@ -92,8 +105,11 @@
     Vendor class. Defaults to PXEClient:Arch:<arch>:UNDI:003000.
 
 .PARAMETER DiscoverTimeout
-    Seconds to wait for replies to the broadcast DHCP DISCOVER (default 60). All offers received in that time
-    are listed, so Stage 1 always takes this long. Increase it if the DP has a PXE response delay configured.
+    Longest time to wait for replies to the broadcast DHCP DISCOVER (default 40, in practice at most 33 s because
+    nothing is sent after the last resend). Stage 1 normally stops earlier, as soon as it has a DHCP offer and a PXE
+    offer (see -NoEarlyExit). The DISCOVER is resent at 4, 12 and 28 s, and a PXE server with a response delay only
+    answers a resend once the elapsed time reaches the delay, so use 20 or more to see a server with a delay of
+    about 10 s.
 
 .PARAMETER PxeRequestCount
     How many times to send the PXE request to UDP 4011 on each PXE server before giving up (default 2).
@@ -101,10 +117,13 @@
 
 .PARAMETER PxeTimeout
     Seconds to wait for the reply to each PXE request on UDP 4011 and for the reply to the relay-style
-    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (also default 60).
+    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (default 40).
 
 .PARAMETER PxeServer
     Also send the 4011 request to this server even if it didn't answer the DISCOVER.
+    Also makes runs shorter: the relay-style DISCOVER to this server runs at the same time as the broadcast, and how
+    soon it answers tells the script how long to wait for the broadcast. Without it, if no PXE offer arrives, Stage 1
+    waits for the whole resend schedule (about 33 s) before it can say so.
 
 .PARAMETER TftpServer
     Override the TFTP server returned by PXE.
@@ -158,6 +177,10 @@
     field set to the time since the first, as a PXE ROM does. A PXE server with a response delay configured
     ignores a DISCOVER until that field reaches the delay, so without the resends it never answers.
 
+.PARAMETER NoEarlyExit
+    Always wait the full -DiscoverTimeout in Stage 1. Normally Stage 1 stops once a DHCP offer and a PXE offer
+    have arrived (plus 1.5 s for other servers), or 3 s after the PXE server answers the relay-style DISCOVER.
+
 .PARAMETER PassThru
     Return a result object as well as printing the report.
 
@@ -186,7 +209,7 @@ Param(
     [String]$UUIDString,
     [ValidateRange(0, 65535)][int]$ProcessorArchitecture = 7,
     [String]$Option60String,
-    [int]$DiscoverTimeout = 60,
+    [int]$DiscoverTimeout = 40,
     [ValidateRange(1, 20)][int]$PxeRequestCount = 2,
     [ValidateRange(1, 300)][int]$PxeTimeout = 60,
     [String]$PxeServer,
@@ -204,14 +227,18 @@ Param(
     [switch]$SkipRelayTest,
     [switch]$SkipDirectedBroadcast,
     [switch]$NoDiscoverResend,
+    [switch]$NoEarlyExit,
     [switch]$PassThru,
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.13.0'
+$ScriptVersion = '1.14.0'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
+# Nothing is sent after the last resend, so waiting much longer for a reply is pointless
+$DiscoverWindowCap = if ($DiscoverResendAt.Count) { $DiscoverResendAt[$DiscoverResendAt.Count - 1] + 5 } else { [int]::MaxValue }
+$relayCache = @{}
 
 function Show-Usage {
     Write-Host "DHCP-PXE-TFTP-Test.ps1 v$ScriptVersion" -ForegroundColor White
@@ -500,11 +527,113 @@ function Invoke-RelayDiscover([Net.IPAddress]$ServerIP) {
             [Array]::Copy($localIP.GetAddressBytes(), 0, $relayPkt, 24, 4)
             [void]$rs.SendTo($relayPkt, (New-Object Net.IPEndPoint($ServerIP, 67)))
         }
-        $replies = @(Receive-DhcpReplies -Socket $rs -Xid $x -TimeoutSeconds $PxeTimeout -FirstOnly -ResendAt $DiscoverResendAt -Resend $resendRelay)
+        $waitFor = [math]::Min($PxeTimeout, $DiscoverWindowCap)
+        $replies = @(Receive-DhcpReplies -Socket $rs -Xid $x -TimeoutSeconds $waitFor -FirstOnly -ResendAt $DiscoverResendAt -Resend $resendRelay)
         $offer = $replies | Where-Object { $_.VendorClass -like 'PXEClient*' } | Select-Object -First 1
-        [pscustomobject]@{ Ran = $true; Answered = [bool]$offer; Offer = $offer; Note = "relay address $localIP" }
+        [pscustomobject]@{ Ran = $true; Answered = [bool]$offer; Offer = $offer; Note = "relay address $localIP"; Waited = $waitFor }
     }
     finally { $rs.Close() }
+}
+
+function Invoke-DiscoverPhase {
+    # Stage 1 in one loop: the broadcast DISCOVER (resent like a PXE ROM) and, when a PXE server is named with
+    # -PxeServer, the relay-style DISCOVER to it at the same time. It stops as soon as the results needed are in:
+    #   - a DHCP offer and a PXE offer have arrived (plus a short grace for other servers), or
+    #   - the PXE server answered the relay-style DISCOVER and the broadcast has had 3 s more (a forwarded
+    #     broadcast would have been answered by then), or
+    #   - the wait window ends (-DiscoverTimeout, capped at the last resend + 5 s).
+    param([Net.Sockets.Socket]$Sock, [byte[]]$Xid, $Endpoints, [Net.IPAddress]$RelayServerIP)
+
+    $grace = 1.5
+    $bWindow = [math]::Min($DiscoverTimeout, $DiscoverWindowCap)
+    $rWindow = [math]::Min($PxeTimeout, $DiscoverWindowCap)
+    $xidText = [BitConverter]::ToString($Xid)
+    $offers = New-Object System.Collections.Generic.List[object]
+    $buf = New-Object byte[] 4096
+    $haveLease = $false; $havePxe = $false; $satisfiedAt = $null
+    $why = 'wait window ended'
+
+    $sendBroadcast = {
+        param($secs)
+        $bPkt = New-DhcpPacket -MessageType 1 -Xid $Xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed $secs
+        foreach ($bEp in $Endpoints) { try { [void]$Sock.SendTo($bPkt, $bEp) } catch { } }
+    }
+
+    $rs = $null; $relayResult = $null; $relayOffer = $null; $relayAnsweredAt = $null; $relayText = $null; $relayLocal = $null
+    if ($RelayServerIP) {
+        $relayLocal = Get-LocalIPv4ForTarget $RelayServerIP
+        try { $rs = New-UdpSocket -Port 67 }
+        catch { $relayResult = [pscustomobject]@{ Ran = $false; Answered = $false; Offer = $null; Note = "could not bind UDP 67 ($($_.Exception.Message))"; Waited = 0 } }
+        if ($rs) {
+            $relayXid = New-Object byte[] 4; (New-Object Random).NextBytes($relayXid)
+            $relayText = [BitConverter]::ToString($relayXid)
+            $sendRelay = {
+                param($secs)
+                $rPkt = New-DhcpPacket -MessageType 1 -Xid $relayXid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed $secs
+                $rPkt[3] = 1                                                      # hops
+                [Array]::Copy($relayLocal.GetAddressBytes(), 0, $rPkt, 24, 4)     # giaddr
+                [void]$rs.SendTo($rPkt, (New-Object Net.IPEndPoint($RelayServerIP, 67)))
+            }
+        }
+    }
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    & $sendBroadcast 4
+    if ($rs) { & $sendRelay 4 }
+    $nextB = 0; $nextR = 0; $bFinished = $false
+    try {
+        while ($true) {
+            $t = $sw.Elapsed.TotalSeconds
+            if ($nextB -lt $DiscoverResendAt.Count -and $t -ge $DiscoverResendAt[$nextB]) { & $sendBroadcast ([math]::Max(4, [int]$t)); $nextB++ }
+            if ($rs -and -not $relayOffer -and $nextR -lt $DiscoverResendAt.Count -and $t -ge $DiscoverResendAt[$nextR]) { & $sendRelay ([math]::Max(4, [int]$t)); $nextR++ }
+
+            # The relay-style test is only needed while no PXE offer has arrived to the broadcast
+            $relayActive = [bool]$rs -and -not $relayOffer -and -not $havePxe -and ($t -lt $rWindow)
+            if (-not $bFinished) {
+                if ($t -ge $bWindow) { $bFinished = $true }
+                elseif (-not $NoEarlyExit) {
+                    if ($null -ne $satisfiedAt -and ($t - $satisfiedAt) -ge $grace) { $bFinished = $true; $why = 'got a DHCP offer and a PXE offer' }
+                    elseif ($relayOffer -and ($t - $relayAnsweredAt) -ge 3) { $bFinished = $true; $why = 'the PXE server answered the direct test; no broadcast offer arrived' }
+                }
+            }
+            if ($bFinished -and -not $relayActive) { break }
+
+            $readList = New-Object System.Collections.ArrayList
+            [void]$readList.Add($Sock)
+            if ($rs) { [void]$readList.Add($rs) }
+            try { [Net.Sockets.Socket]::Select($readList, $null, $null, 200000) } catch { Start-Sleep -Milliseconds 200; continue }
+            foreach ($s in @($readList)) {
+                $remote = [Net.EndPoint](New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0))
+                try { $n = $s.ReceiveFrom($buf, [ref]$remote) } catch [Net.Sockets.SocketException] { Start-Sleep -Milliseconds 20; continue }
+                $pk = Read-DhcpPacket -Packet $buf -Length $n
+                if (-not $pk -or $pk.Op -ne 2) { continue }
+                if ([object]::ReferenceEquals($s, $Sock)) {
+                    if ($pk.XID -ne $xidText) { continue }
+                    $pk | Add-Member NoteProperty SourceIP $remote.Address.ToString()
+                    $pk | Add-Member NoteProperty ElapsedMs $sw.ElapsedMilliseconds
+                    $offers.Add($pk)
+                    if ($pk.YIAddr -ne '0.0.0.0') { $haveLease = $true }
+                    if ($pk.VendorClass -like 'PXEClient*') { $havePxe = $true }
+                    if ($haveLease -and $havePxe -and $null -eq $satisfiedAt) { $satisfiedAt = $sw.Elapsed.TotalSeconds }
+                }
+                elseif ($rs -and [object]::ReferenceEquals($s, $rs)) {
+                    if ($pk.XID -ne $relayText -or $relayOffer -or $pk.VendorClass -notlike 'PXEClient*') { continue }
+                    $pk | Add-Member NoteProperty SourceIP $remote.Address.ToString()
+                    $pk | Add-Member NoteProperty ElapsedMs $sw.ElapsedMilliseconds
+                    $relayOffer = $pk
+                    $relayAnsweredAt = $sw.Elapsed.TotalSeconds
+                }
+            }
+        }
+    }
+    finally { if ($rs) { $rs.Close() } }
+
+    if ($rs) {
+        if ($relayOffer) { $relayResult = [pscustomobject]@{ Ran = $true; Answered = $true; Offer = $relayOffer; Note = "relay address $relayLocal"; Waited = $rWindow } }
+        elseif (-not $havePxe) { $relayResult = [pscustomobject]@{ Ran = $true; Answered = $false; Offer = $null; Note = "relay address $relayLocal"; Waited = $rWindow } }
+        # else: a PXE offer arrived to the broadcast, so the relay-style test was not needed
+    }
+    [pscustomobject]@{ Offers = $offers.ToArray(); Relay = $relayResult; Seconds = $sw.Elapsed.TotalSeconds; Why = $why }
 }
 
 #endregion
@@ -759,14 +888,14 @@ if ($TftpOnly) {
 }
 else {
     # ---------------------------------------------------------- Stage 1: DHCP DISCOVER
-    Write-Stage "Stage 1 - DHCP DISCOVER (waiting $DiscoverTimeout s for offers)"
+    $stage1Window = [math]::Min($DiscoverTimeout, $DiscoverWindowCap)
+    Write-Stage "Stage 1 - DHCP DISCOVER (up to $stage1Window s$(if (-not $NoEarlyExit) { '; stops early once a DHCP and a PXE offer arrive' }))"
 
     try { $sock = New-UdpSocket -Port 68 }
     catch { throw "Could not bind UDP port 68: $($_.Exception.Message). Run elevated, and not on a DHCP server or the PXE-enabled distribution point itself." }
 
     try {
         $xid = New-Object byte[] 4; (New-Object Random).NextBytes($xid)
-        $discover = New-DhcpPacket -MessageType 1 -Xid $xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast
         $discoverEndpoints = New-Object System.Collections.Generic.List[Net.IPEndPoint]
         $discoverEndpoints.Add((New-Object Net.IPEndPoint([Net.IPAddress]::Broadcast, 67)))
         $sentTo = @('255.255.255.255')
@@ -777,18 +906,17 @@ else {
                 $sentTo += "$($bc.Broadcast) ($($bc.Local))"
             }
         }
-        foreach ($ep in $discoverEndpoints) {
-            try { [void]$sock.SendTo($discover, $ep) }
-            catch { Write-Host "  Could not send to $($ep.Address): $($_.Exception.Message)" -ForegroundColor Yellow }
-        }
         Write-Host "  DISCOVER sent to: $($sentTo -join ', ')"
-        if ($DiscoverResendAt.Count) { Write-Host "  Resent at $($DiscoverResendAt -join ', ') s, as a PXE ROM does (-NoDiscoverResend to send once)" -ForegroundColor DarkGray }
-        $resendDiscover = {
-            param($elapsed)
-            $resendPkt = New-DhcpPacket -MessageType 1 -Xid $xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed ([math]::Max(4, $elapsed))
-            foreach ($resendEp in $discoverEndpoints) { try { [void]$sock.SendTo($resendPkt, $resendEp) } catch { } }
-        }
-        $offers = @(Receive-DhcpReplies -Socket $sock -Xid $xid -TimeoutSeconds $DiscoverTimeout -ResendAt $DiscoverResendAt -Resend $resendDiscover)
+        $resendsInTime = @($DiscoverResendAt | Where-Object { $_ -lt $stage1Window })
+        if ($resendsInTime.Count) { Write-Host "  Resent at $($resendsInTime -join ', ') s, as a PXE ROM does (-NoDiscoverResend to send once)" -ForegroundColor DarkGray }
+        if ($DiscoverTimeout -lt 20 -and -not $NoDiscoverResend) { Write-Host "  Note: a PXE server with a response delay of about 10 s only answers the resend at 12 s; use -DiscoverTimeout 20 or more to see its offer." -ForegroundColor DarkGray }
+        # With -PxeServer the relay-style DISCOVER to it runs at the same time
+        $relayTarget = $null
+        if ($PxeServer -and -not $SkipRelayTest) { try { $relayTarget = Resolve-IPv4 $PxeServer } catch { } }
+        $phase = Invoke-DiscoverPhase -Sock $sock -Xid $xid -Endpoints $discoverEndpoints -RelayServerIP $relayTarget
+        $offers = @($phase.Offers)
+        if ($relayTarget -and $phase.Relay) { $relayCache[$relayTarget.ToString()] = $phase.Relay }
+        Write-Host ("  Stage 1 finished after {0:N1} s ({1})" -f $phase.Seconds, $phase.Why) -ForegroundColor DarkGray
         # A server reached by both broadcasts answers twice: keep the first reply of each kind
         $offers = @($offers | Group-Object { '{0}|{1}|{2}|{3}' -f $_.SourceIP, $_.ServerIdentifier, $_.YIAddr, $_.MessageType } | ForEach-Object { $_.Group[0] })
 
@@ -865,10 +993,11 @@ else {
                 Write-Host "  Relay test to $($t.Ip) skipped: it is on this PC's own subnet, so no relay is involved." -ForegroundColor DarkGray
             }
             elseif ($proxyOffers.Count -eq 0 -and -not $SkipRelayTest) {
-                $relay = Invoke-RelayDiscover ([Net.IPAddress]::Parse($t.Ip))
+                $relay = $relayCache[$t.Ip]
+                if (-not $relay) { $relay = Invoke-RelayDiscover ([Net.IPAddress]::Parse($t.Ip)) }
                 if (-not $relay.Ran) { Write-Host "  Relay test to $($t.Ip) skipped: $($relay.Note)" -ForegroundColor Yellow }
                 elseif ($relay.Answered) { Write-Host ("  [{0,5} ms] {1,-15} relay test: answered a relay-style DISCOVER sent directly ({2})" -f $relay.Offer.ElapsedMs, $t.Ip, $relay.Note) -ForegroundColor Green }
-                else { Write-Host ("  {0,-15} relay test: no answer to a relay-style DISCOVER sent directly after {2} s ({1})" -f $t.Ip, $relay.Note, $PxeTimeout) -ForegroundColor Yellow }
+                else { Write-Host ("  {0,-15} relay test: no answer to a relay-style DISCOVER sent directly after {2} s ({1})" -f $t.Ip, $relay.Note, $relay.Waited) -ForegroundColor Yellow }
             }
 
             $pxeReq = Invoke-PxeRequest -Socket $sock -ServerIP ([Net.IPAddress]::Parse($t.Ip))
