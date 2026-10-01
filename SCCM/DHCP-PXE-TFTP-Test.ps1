@@ -1,7 +1,9 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.13.1   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.13.2   (2026-10-01)
 #
+#  1.13.2 Default -DiscoverTimeout set to 40 seconds (was 10) so every DISCOVER resend (4, 12 and 28 s)
+#         and its reply fits in the wait, including a PXE server with a response delay of about 10 s.
 #  1.13.1 Default -DiscoverTimeout (the broadcast DHCP DISCOVER wait) lowered from 60 to 10 seconds.
 #         -PxeTimeout (4011 request and relay-style DISCOVER) stays at 60. With 10 s only the DISCOVER
 #         resend at 4 s happens, so a PXE server with a response delay of about 10 s will not show a
@@ -96,10 +98,10 @@
     Vendor class. Defaults to PXEClient:Arch:<arch>:UNDI:003000.
 
 .PARAMETER DiscoverTimeout
-    Seconds to wait for replies to the broadcast DHCP DISCOVER (default 10). All offers received in that time
-    are listed, so Stage 1 always takes this long. A PXE server with a response delay only answers the DISCOVER
-    resends once the elapsed time reaches the delay (resends go out at 4, 12 and 28 s), so use 20 or more to see
-    a ProxyDHCP offer from a server with a delay of about 10 s.
+    Seconds to wait for replies to the broadcast DHCP DISCOVER (default 40). All offers received in that time
+    are listed, so Stage 1 always takes this long. The DISCOVER is resent at 4, 12 and 28 s, and a PXE server with
+    a response delay only answers a resend once the elapsed time reaches the delay, so the default leaves time
+    for every resend and its reply. Use 20 or more to see a server with a delay of about 10 s.
 
 .PARAMETER PxeRequestCount
     How many times to send the PXE request to UDP 4011 on each PXE server before giving up (default 2).
@@ -107,7 +109,7 @@
 
 .PARAMETER PxeTimeout
     Seconds to wait for the reply to each PXE request on UDP 4011 and for the reply to the relay-style
-    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (default 10).
+    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (default 40).
 
 .PARAMETER PxeServer
     Also send the 4011 request to this server even if it didn't answer the DISCOVER.
@@ -192,7 +194,7 @@ Param(
     [String]$UUIDString,
     [ValidateRange(0, 65535)][int]$ProcessorArchitecture = 7,
     [String]$Option60String,
-    [int]$DiscoverTimeout = 10,
+    [int]$DiscoverTimeout = 40,
     [ValidateRange(1, 20)][int]$PxeRequestCount = 2,
     [ValidateRange(1, 300)][int]$PxeTimeout = 60,
     [String]$PxeServer,
@@ -214,7 +216,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.13.1'
+$ScriptVersion = '1.13.2'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
