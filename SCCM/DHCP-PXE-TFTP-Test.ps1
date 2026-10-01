@@ -1,7 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.13.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.13.1   (2026-10-01)
 #
+#  1.13.1 Default -DiscoverTimeout (the broadcast DHCP DISCOVER wait) lowered from 60 to 10 seconds.
+#         -PxeTimeout (4011 request and relay-style DISCOVER) stays at 60. With 10 s only the DISCOVER
+#         resend at 4 s happens, so a PXE server with a response delay of about 10 s will not show a
+#         ProxyDHCP offer; a note is printed. Use -DiscoverTimeout 20 or more to see it.
 #  1.13.0 DHCPDISCOVERs are now resent like a PXE ROM does (same transaction ID, at 4, 12 and 28 s, with the
 #         'seconds elapsed' field set to the time since the first one). A ConfigMgr PXE server with a PXE
 #         response delay (SMSPXE.log: 'Client time since boot is 4. Response delay is 10. Ignoring
@@ -92,8 +96,10 @@
     Vendor class. Defaults to PXEClient:Arch:<arch>:UNDI:003000.
 
 .PARAMETER DiscoverTimeout
-    Seconds to wait for replies to the broadcast DHCP DISCOVER (default 60). All offers received in that time
-    are listed, so Stage 1 always takes this long. Increase it if the DP has a PXE response delay configured.
+    Seconds to wait for replies to the broadcast DHCP DISCOVER (default 10). All offers received in that time
+    are listed, so Stage 1 always takes this long. A PXE server with a response delay only answers the DISCOVER
+    resends once the elapsed time reaches the delay (resends go out at 4, 12 and 28 s), so use 20 or more to see
+    a ProxyDHCP offer from a server with a delay of about 10 s.
 
 .PARAMETER PxeRequestCount
     How many times to send the PXE request to UDP 4011 on each PXE server before giving up (default 2).
@@ -101,7 +107,7 @@
 
 .PARAMETER PxeTimeout
     Seconds to wait for the reply to each PXE request on UDP 4011 and for the reply to the relay-style
-    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (also default 60).
+    DISCOVER (default 60). The wait for replies to the broadcast DHCP DISCOVER is set by -DiscoverTimeout (default 10).
 
 .PARAMETER PxeServer
     Also send the 4011 request to this server even if it didn't answer the DISCOVER.
@@ -186,7 +192,7 @@ Param(
     [String]$UUIDString,
     [ValidateRange(0, 65535)][int]$ProcessorArchitecture = 7,
     [String]$Option60String,
-    [int]$DiscoverTimeout = 60,
+    [int]$DiscoverTimeout = 10,
     [ValidateRange(1, 20)][int]$PxeRequestCount = 2,
     [ValidateRange(1, 300)][int]$PxeTimeout = 60,
     [String]$PxeServer,
@@ -208,7 +214,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.13.0'
+$ScriptVersion = '1.13.1'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
@@ -782,7 +788,9 @@ else {
             catch { Write-Host "  Could not send to $($ep.Address): $($_.Exception.Message)" -ForegroundColor Yellow }
         }
         Write-Host "  DISCOVER sent to: $($sentTo -join ', ')"
-        if ($DiscoverResendAt.Count) { Write-Host "  Resent at $($DiscoverResendAt -join ', ') s, as a PXE ROM does (-NoDiscoverResend to send once)" -ForegroundColor DarkGray }
+        $resendsInTime = @($DiscoverResendAt | Where-Object { $_ -lt $DiscoverTimeout })
+        if ($resendsInTime.Count) { Write-Host "  Resent at $($resendsInTime -join ', ') s, as a PXE ROM does (-NoDiscoverResend to send once)" -ForegroundColor DarkGray }
+        if ($DiscoverTimeout -lt 20 -and -not $NoDiscoverResend) { Write-Host "  Note: a PXE server with a response delay of about 10 s only answers the resend at 12 s; use -DiscoverTimeout 20 or more to see its offer." -ForegroundColor DarkGray }
         $resendDiscover = {
             param($elapsed)
             $resendPkt = New-DhcpPacket -MessageType 1 -Xid $xid -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed ([math]::Max(4, $elapsed))
