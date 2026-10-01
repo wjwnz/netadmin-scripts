@@ -1,7 +1,12 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.14.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.14.1   (2026-10-01)
 #
+#  1.14.1 The DHCP/PXE requests now match a real Dell UEFI PXE ROM captured on the wire. Option 55 is the
+#         ROM's 35-item list, which ASKS FOR options 66 and 67 (v1.11.3 had switched to a 24-item sample
+#         from Microsoft's article that does not, so a DHCP scope handing out 066/067 was no longer
+#         visible: this fixes that). Also: option order as the ROM sends it, UNDI 3.16 (vendor class
+#         ...:UNDI:003016) and 'seconds elapsed' 0 on the first DISCOVER (resends 4, 12, 28 as before).
 #  1.14.0 Shorter runs. Stage 1 now stops as soon as it has what it needs: a DHCP offer and a PXE offer
 #         (1.5 s grace for other servers), or, when -PxeServer is given, 3 s after the PXE server answers
 #         the relay-style DISCOVER (a forwarded broadcast would have been answered by then). The
@@ -102,7 +107,7 @@
     Option 93 client architecture: 0 = BIOS x86/x64, 6 = UEFI x86, 7 = UEFI x64, 9 = EFI BC.
 
 .PARAMETER Option60String
-    Vendor class. Defaults to PXEClient:Arch:<arch>:UNDI:003000.
+    Vendor class. Defaults to PXEClient:Arch:<arch>:UNDI:003016 (as a Dell UEFI ROM sends).
 
 .PARAMETER DiscoverTimeout
     Longest time to wait for replies to the broadcast DHCP DISCOVER (default 40, in practice at most 33 s because
@@ -232,7 +237,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.14.0'
+$ScriptVersion = '1.14.1'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
@@ -267,7 +272,7 @@ if ($Help) { Show-Usage; return }
 # Name and version first, before anything else can print
 Write-Host "SCCM PXE boot chain test v$ScriptVersion - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') on $env:COMPUTERNAME" -ForegroundColor White
 
-if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003000" -f $ProcessorArchitecture }
+if (-not $Option60String) { $Option60String = "PXEClient:Arch:{0:D5}:UNDI:003016" -f $ProcessorArchitecture }
 
 #region ---------------------------------------------------------------- Helpers
 
@@ -380,7 +385,7 @@ function New-DhcpPacket {
         [int]$Arch,
         [string]$VendorClass,
         [Net.IPAddress]$ClientIP = [Net.IPAddress]::Any,
-        [int]$SecondsElapsed = 4,                        # some IP helpers drop requests with secs = 0
+        [int]$SecondsElapsed = 0,                        # a PXE ROM sends 0 on the first DISCOVER, then the elapsed time on resends
         [switch]$Broadcast
     )
     $hdr = New-Object byte[] 236
@@ -398,15 +403,19 @@ function New-DhcpPacket {
     $p.AddRange($hdr)
     $p.AddRange([byte[]](99, 130, 83, 99))              # magic cookie
     $p.AddRange([byte[]](53, 1, $MessageType))          # message type
-    # The 24-item list (and order) from the sample DHCPDISCOVER in Microsoft's PXE boot article; it does not ask for option 66
-    $prl = [byte[]](1, 2, 3, 5, 6, 11, 12, 13, 15, 16, 17, 18, 43, 54, 60, 67, 128, 129, 130, 131, 132, 133, 134, 135)
-    $p.Add(55); $p.Add([byte]$prl.Length); $p.AddRange($prl)
-    $p.AddRange([byte[]](57, 2, 5, 192))                # max message size 1472
+    # Options exactly as a Dell UEFI PXE ROM sends them (captured on the wire). Option 55 asks for 66 and 67.
+    $prl = [byte[]](1, 2, 3, 4, 5, 6, 12, 13, 15, 17, 18, 22, 23, 28, 40, 41, 42, 43, 50, 51, 54, 58, 59, 60, 66, 67, 97, 128, 129, 130, 131, 132, 133, 134, 135)
     $vc = [Text.Encoding]::ASCII.GetBytes($VendorClass)
-    $p.Add(60); $p.Add([byte]$vc.Length); $p.AddRange($vc)
-    $p.AddRange([byte[]](93, 2, [byte](($Arch -shr 8) -band 0xFF), [byte]($Arch -band 0xFF)))
-    $p.AddRange([byte[]](94, 3, 1, 3, 0))               # UNDI 3.0
-    $p.AddRange([byte[]](97, 17, 0)); $p.AddRange($Uuid.ToByteArray())
+    $opt55 = [byte[]](@(55, $prl.Length) + $prl)
+    $opt57 = [byte[]](57, 2, 5, 192)                                                                  # max message size 1472
+    $opt60 = [byte[]](@(60, $vc.Length) + $vc)
+    $opt93 = [byte[]](93, 2, [byte](($Arch -shr 8) -band 0xFF), [byte]($Arch -band 0xFF))
+    $opt94 = [byte[]](94, 3, 1, 3, 16)                                                                # UNDI 3.16
+    $opt97 = [byte[]](@(97, 17, 0) + $Uuid.ToByteArray())
+    # The ROM's DISCOVER orders them 57, 55, 97, 94, 93, 60; its UDP 4011 request orders them 55, 57, 60, 93, 94, 97
+    if ($MessageType -eq 1) { $optOrder = $opt57, $opt55, $opt97, $opt94, $opt93, $opt60 }
+    else { $optOrder = $opt55, $opt57, $opt60, $opt93, $opt94, $opt97 }
+    foreach ($optBytes in $optOrder) { $p.AddRange($optBytes) }
     $p.Add(255)
     while ($p.Count -lt 300) { $p.Add(0) }              # BOOTP minimum size
     , $p.ToArray()
@@ -522,7 +531,7 @@ function Invoke-RelayDiscover([Net.IPAddress]$ServerIP) {
         [void]$rs.SendTo($pkt, (New-Object Net.IPEndPoint($ServerIP, 67)))
         $resendRelay = {
             param($elapsed)
-            $relayPkt = New-DhcpPacket -MessageType 1 -Xid $x -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed ([math]::Max(4, $elapsed))
+            $relayPkt = New-DhcpPacket -MessageType 1 -Xid $x -MacBytes $macBytes -Uuid $uuid -Arch $ProcessorArchitecture -VendorClass $Option60String -Broadcast -SecondsElapsed $elapsed
             $relayPkt[3] = 1
             [Array]::Copy($localIP.GetAddressBytes(), 0, $relayPkt, 24, 4)
             [void]$rs.SendTo($relayPkt, (New-Object Net.IPEndPoint($ServerIP, 67)))
@@ -578,14 +587,14 @@ function Invoke-DiscoverPhase {
     }
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    & $sendBroadcast 4
-    if ($rs) { & $sendRelay 4 }
+    & $sendBroadcast 0
+    if ($rs) { & $sendRelay 0 }
     $nextB = 0; $nextR = 0; $bFinished = $false
     try {
         while ($true) {
             $t = $sw.Elapsed.TotalSeconds
-            if ($nextB -lt $DiscoverResendAt.Count -and $t -ge $DiscoverResendAt[$nextB]) { & $sendBroadcast ([math]::Max(4, [int]$t)); $nextB++ }
-            if ($rs -and -not $relayOffer -and $nextR -lt $DiscoverResendAt.Count -and $t -ge $DiscoverResendAt[$nextR]) { & $sendRelay ([math]::Max(4, [int]$t)); $nextR++ }
+            if ($nextB -lt $DiscoverResendAt.Count -and $t -ge $DiscoverResendAt[$nextB]) { & $sendBroadcast ([int]$t); $nextB++ }
+            if ($rs -and -not $relayOffer -and $nextR -lt $DiscoverResendAt.Count -and $t -ge $DiscoverResendAt[$nextR]) { & $sendRelay ([int]$t); $nextR++ }
 
             # The relay-style test is only needed while no PXE offer has arrived to the broadcast
             $relayActive = [bool]$rs -and -not $relayOffer -and -not $havePxe -and ($t -lt $rWindow)
