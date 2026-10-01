@@ -133,6 +133,29 @@ Use this step for site-wide failures, or when the device-side steps found nothin
 8. Start the "Wired AutoConfig" service again to return the computer to the corporate network.
 9. Attach the script output to the ticket.
 
+**Example: a successful test on the imaging VLAN** (key lines only; names, addresses and IDs replaced)
+
+```
+SCCM PXE boot chain test v1.14.1 - <date time> on <COMPUTER>
+  MAC  : <MAC>  (this PC: 'Ethernet', <imaging VLAN IP>)
+  Stage 1 finished after 15.1 s (got a DHCP offer and a PXE offer)
+  [  142 ms] DHCP           from <router>  ServerID=<DHCP server>  YourIP=<imaging VLAN IP>
+  [13438 ms] ProxyDHCP/PXE  from <router>  ServerID=<PXE server>   YourIP=0.0.0.0
+             late reply (13.4 s): this PXE server probably has a PXE response delay configured
+  [ 1154 ms] <PXE server>  (answered the PXE broadcast) -> BootFile='smsboot\<package ID>\x64\wdsmgfw.efi'
+  OK   1,171,224 bytes in 1.59s  timeouts=0 out-of-order=0
+  DHCP  PASS    PXE  PASS    TFTP  PASS
+  1. [LOW] PXE server <PXE server>: set the PXE response delay on the distribution point to 0
+```
+
+How to read it:
+
+- Stage 1 finished with both a DHCP offer (142 ms) and a ProxyDHCP/PXE offer from the PXE server. The PXE offer arrived late, at 13.4 s.
+- Stage 2: the PXE server returned the boot file in 1154 ms.
+- Stage 3: TFTP downloaded 1,171,224 bytes with 0 timeouts.
+- Summary: DHCP, PXE and TFTP all PASS. The one recommended action is LOW: the late offer means the PXE server probably has a PXE response delay. A real client waits that long before PXE starts, so set the delay to 0 on the distribution point if it is not deliberate.
+- The script reported no DHCP options 066/067, so this scope is not handing out a boot file.
+
 Read its result with care. The script sends its DISCOVER from a PC that already has an IP address, while a real PXE ROM has none, but it resends it at 4, 12 and 28 seconds as a ROM does, so a PXE server with a response delay still answers. If the script gets an answer to its direct test but no PXE offer to the broadcast, the router's IP helper is not forwarding to the PXE server. If it reports that the DHCP scope hands out options 066/067, fix that first, because it is a likely cause of "No bootable devices found". Run it from a PC on the same VLAN as the failing device, because DHCP options are set per scope.
 
 **Check the network path:**
