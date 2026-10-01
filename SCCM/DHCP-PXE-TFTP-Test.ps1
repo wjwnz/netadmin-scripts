@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.14.2   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.15.0   (2026-10-01)
 #
+#  1.15.0 TFTP defaults now match a real Dell UEFI PXE ROM: block size 1468 (was 1456) and window size 4 (was 1),
+#         so the throughput the script reports is closer to what a real client gets. Use -TftpWindowSize 1
+#         for classic lock-step TFTP, or -TftpBlockSize 1456 for the old size.
 #  1.14.2 Help text and the port 68 error no longer say the script must be run elevated: it works from a normal
 #         PowerShell window. (If binding UDP 67/68 is refused on a locked-down PC, try elevated.)
 #  1.14.1 The DHCP/PXE requests now match a real Dell UEFI PXE ROM captured on the wire. Option 55 is the
@@ -146,10 +149,11 @@
     Skip DHCP/PXE and only test TFTP (requires -TftpServer and -BootFile).
 
 .PARAMETER TftpBlockSize
-    Requested TFTP block size (SCCM default is 4096 on the client side; 1456 avoids fragmentation).
+    Requested TFTP block size (default 1468, as a Dell UEFI PXE ROM requests; with the 4-byte TFTP header and the UDP and
+    IP headers it fills a 1500-byte frame exactly, so it does not fragment).
 
 .PARAMETER TftpWindowSize
-    Requested TFTP window size (RFC 7440). 1 = classic lock-step TFTP.
+    Requested TFTP window size (RFC 7440, default 4, as a Dell UEFI PXE ROM requests). 1 = classic lock-step TFTP.
 
 .PARAMETER TftpNoOptions
     Send a plain RFC 1350 read request (no blksize/tsize/windowsize) - useful if the server rejects option negotiation.
@@ -224,8 +228,8 @@ Param(
     [String]$BootFile,
     [String[]]$AdditionalTftpFiles,
     [switch]$TftpOnly,
-    [ValidateRange(512, 65464)][int]$TftpBlockSize = 1456,
-    [ValidateRange(1, 64)][int]$TftpWindowSize = 1,
+    [ValidateRange(512, 65464)][int]$TftpBlockSize = 1468,
+    [ValidateRange(1, 64)][int]$TftpWindowSize = 4,
     [int]$TftpTimeout = 3,
     [int]$TftpRetries = 5,
     [switch]$TftpNoOptions,
@@ -239,7 +243,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.14.2'
+$ScriptVersion = '1.15.0'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }

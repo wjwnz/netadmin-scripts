@@ -2,12 +2,33 @@
 
 ## Introduction
 
-Use this guide when a device fails to PXE boot or fails during imaging. Start with the quick triage table, decide whether the problem is one device or a whole site, then work through the steps in order.
+Use this guide when a device fails to PXE boot or fails during imaging. It is written for Service Desk (Tier 1) and Desktop Support (Tier 2). Start with the symptom tables, decide whether the problem is one device or a whole site, then work through the steps in order. Where a step needs the DHCP team, network team, SCCM Server Admins or EEA, the guide says so.
 
-- **Audience:** service desk and field technicians, with EEA and SCCM Server Admins as the escalation teams.
-- **Scope:** UEFI PXE imaging of Windows 11 through Configuration Manager. BIOS settings are given for Dell systems only.
-- **What good looks like:** the device shows "Start PXE over IPv4", then loads WDS Boot Manager, then starts the task sequence. If you reach WDS Boot Manager, PXE itself is working.
+- **Scope:** UEFI PXE imaging of Windows 11 through Configuration Manager. BIOS settings are given for Dell systems only. The distribution points use the PXE responder without the WDS role, so Microsoft's WDS-specific steps do not apply.
+- **What good looks like:** the device shows "Start PXE over IPv4", then "WDS Boot Manager", then WinPE and the task sequence. If you reach WDS Boot Manager, PXE itself is working. The name "WDS Boot Manager" is normal even without the WDS role.
+- **PXE password:** open question. The distribution point requires a password when computers use PXE. State here when the prompt appears and where technicians get the password. Do not write the password in this guide.
 - **Owner and last review date:** to be added before publishing.
+
+## Who does what
+
+| Role | What they do | Hand over to |
+| --- | --- | --- |
+| **Service Desk (Tier 1)** | Checks power, cable, port and dock (Steps 1 and 3). Uses the symptom tables to decide one device or a whole site. Collects the ticket details (Step 8). | Desktop Support |
+| **Desktop Support (Tier 2)** | Checks BIOS and Secure Boot (Steps 2 and 4), GNDS (Step 5) and USB boot (Step 6). Runs the test script on the imaging VLAN and reads its result (Step 7). Collects `smsts.log` (Step 8). | The team the script result points to (see Step 7), or EEA |
+| **Escalation teams** | DHCP team, network team and SCCM Server Admins do the network, DHCP and server checks in Step 7. EEA looks at the device image and task sequence (Step 8). | |
+
+## Where did it stop?
+
+PXE boot runs in stages. Find the last stage that worked, then use the owner shown.
+
+| Stage | What you see | Usual owner | Go to |
+| --- | --- | --- | --- |
+| 1. Network link and IP address | No link lights, or no IP address for the device in GNDS | Service Desk, then Desktop Support | Steps 3 and 5 |
+| 2. DHCP and PXE offers | "Start PXE over IPv4" then times out, `PXE-E51`, PXE-E52 | Desktop Support, then DHCP or network team | Steps 5 and 7 |
+| 3. Boot program (`wdsmgfw.efi`) over TFTP | `PXE-E53`, `PXE-E55`, PXE-E32, PXE-E3B, or "No bootable device found" | Desktop Support, then DHCP or SCCM Server Admins | Steps 5 and 7 |
+| 4. Boot image download and WinPE start | The boot image loads, then the device restarts or shows an error | Desktop Support, then SCCM Server Admins | Steps 7 and 8 |
+| 5. Task sequence list and policy | WinPE starts but no task sequence is offered, or a policy error appears | Desktop Support, then EEA | Step 8 |
+| 6. Task sequence runs | An error code in the task sequence | EEA | Step 8 |
 
 ## Quick triage: what do you see?
 
@@ -39,6 +60,8 @@ If the cause is a network link problem at the site, such as no link or 802.1x no
 
 ## Step 1: Verify prerequisites
 
+**Who:** Service Desk.
+
 Confirm these before troubleshooting PXE itself:
 
 - The device's MAC address is added to the GNDS site before it is connected to the network (GNDS 4 networks only). If you use a dock or USB Ethernet adapter with MAC pass-through, register the MAC the device presents (the pass-through MAC), not the adapter's own.
@@ -48,6 +71,8 @@ Confirm these before troubleshooting PXE itself:
 - Other devices at the same location can PXE boot. If none can, follow "Who owns the problem" and log a ticket for the SCCM Server Admins.
 
 ## Step 2: Check BIOS settings
+
+**Who:** Desktop Support.
 
 These settings are for Dell systems. For other makes, use the equivalent settings from the vendor.
 
@@ -70,6 +95,8 @@ If PXE still fails:
 
 ## Step 3: Check the network connection
 
+**Who:** Service Desk.
+
 Confirm the link is up and the lights are flashing.
 
 1. Unplug the network cable for two minutes, then plug it back in.
@@ -78,6 +105,8 @@ Confirm the link is up and the lights are flashing.
 4. Test a known-good device on the same port and cable. If it also fails, the problem is the port or network, not the device.
 
 ## Step 4: Secure Boot error
+
+**Who:** Desktop Support.
 
 Symptom: "Operating System Loader Has No Signature".
 
@@ -96,6 +125,8 @@ Resolution:
 
 ## Step 5: GNDS issues (GNDS 4 offices)
 
+**Who:** Desktop Support. (To confirm: whether Service Desk can also check GNDS.)
+
 Symptom: "No bootable device found". A DHCP timeout or a device stuck at "Start PXE over IPv4" can have the same cause, because an unregistered device gets no network access.
 
 **First, check GNDS for an IP address for the device.**
@@ -111,13 +142,17 @@ If the device has no IP address, check:
 
 ## Step 6: Use a USB drive
 
+**Who:** Desktop Support.
+
 Use this when PXE fails but the device, network and GNDS registration are fine. Create a bootable USB by following the knowledge base article "Create Bootable USB". This is the equivalent of PXE booting, not the full offline USB media.
 
 Open question: does the USB boot still need the network and GNDS registration? State the answer here once confirmed.
 
-## Step 7: Network and server checks (SCCM Server Admins and network team)
+## Step 7: Run the test script, then network and server checks
 
 Use this step for site-wide failures, or when the device-side steps found nothing.
+
+### 7a. Desktop Support: run the test script
 
 **Run the PXE test script.** From a Windows PC on the same VLAN as the failing device, open PowerShell and run the script (`DHCP-PXE-TFTP-Test.ps1`). Do not run it on the DHCP server or the distribution point itself. It checks DHCP offers, the PXE server on UDP 4011 and a TFTP download of the boot file, and lists recommended actions for the subnet. Outside the imaging VLAN, add `-PxeServer <DP IP>` to test a specific distribution point.
 
@@ -158,12 +193,28 @@ How to read it:
 
 Read its result with care. The script sends its DISCOVER from a PC that already has an IP address, while a real PXE ROM has none, but it resends it at 4, 12 and 28 seconds as a ROM does, so a PXE server with a response delay still answers. If the script gets an answer to its direct test but no PXE offer to the broadcast, the router's IP helper is not forwarding to the PXE server. If it reports that the DHCP scope hands out options 066/067, fix that first, because it is a likely cause of "No bootable devices found". Run it from a PC on the same VLAN as the failing device, because DHCP options are set per scope.
 
+**What to do with the script result**
+
+| What the script reports | What it means | Who to contact |
+| --- | --- | --- |
+| `DHCP WARN`: DHCP hands out PXE boot options 066/067 | DHCP gives clients a boot file path the distribution point does not have (PXE-E36 or PXE-E3B) | DHCP team: remove options 060, 066 and 067 at server and scope level |
+| `PXE WARN`: answers relayed DISCOVERs sent directly, but not the broadcast relayed by the router | The router is not forwarding the PXE broadcast to the PXE server | Network team: add the PXE server as a second IP helper address |
+| `DHCP FAIL`: no offers received (PXE-E51) | Nothing answered the DHCP broadcast | Network team (port, VLAN, IP helper) and DHCP team (scope) |
+| `PXE FAIL`: did not answer on UDP 4011 (PXE-E55) | The PXE server is not answering requests | SCCM Server Admins |
+| `TFTP FAIL` (PXE-E32, E35, E36, E3B or T04) | The boot file cannot be downloaded | SCCM Server Admins, and the network team if there are timeouts |
+| `late reply` note, LOW action about the PXE response delay | Expected: the distribution point's delay is set to 10 seconds by design | No action |
+| All PASS, but the real device still fails | The problem is on the device or in the task sequence | Desktop Support re-checks BIOS and GNDS, then EEA (Step 8) |
+
+### 7b. Escalation teams: network, DHCP and server checks
+
+These checks are for the DHCP team, network team and SCCM Server Admins. Service Desk and Desktop Support do not need to do them, but should include the script output in the ticket.
+
 **Check the network path:**
 
-- The router's IP helper (DHCP relay) for the subnet points to the DHCP server, and to the PXE-enabled distribution point if the PXE responder relies on the relay.
+- The router's IP helper (DHCP relay) for the subnet has an entry for the DHCP server and a second entry for each PXE-enabled distribution point. Without the second entry, devices get an IP address but no PXE offer.
 - UDP 67, 68, 4011 and 69 are not blocked between the subnet and the distribution point, including by the distribution point's own firewall.
 - The DHCP scope is active and has free addresses.
-- DHCP options 060, 066 and 067 are not set on the scope. The Configuration Manager PXE Responder does not support them, and they can override its answer: a client that takes the boot file from DHCP asks the distribution point for a path it does not have, and ends at "No bootable devices found". Check the scope that serves the failing VLAN, including any vendor-class policy for PXEClient (for example, `Get-DhcpServerv4OptionValue -ComputerName <DHCP server> -ScopeId <scope> -All`).
+- DHCP options 060, 066 and 067 are not set on the scope. The Configuration Manager PXE Responder does not support them, and they can override its answer: a client that takes the boot file from DHCP asks the distribution point for a path it does not have, and ends at "No bootable devices found". Check the options at both the server level and the scope that serves the failing VLAN, including any vendor-class policy for PXEClient (for example, `Get-DhcpServerv4OptionValue -ComputerName <DHCP server> -ScopeId <scope> -All`).
 
 **Check the server:**
 
@@ -171,11 +222,19 @@ Read its result with care. The script sends its DISCOVER from a PC that already 
 - The PXE response delay in the distribution point's properties (PXE tab) is set by design (currently 10 seconds; setting it to 0 is being tested). With a delay, the PXE server ignores a client's early DISCOVERs (SMSPXE.log: "Response delay is 10. Ignoring request."). A PXE ROM waits only about 3 seconds before it uses the boot file from the DHCP offer, so if DHCP options 066/067 are also set, the client can end at "No bootable devices found".
 - `SMSPXE.log` on the distribution point. Search for the device's MAC address around the time of the failure. A `Packet from` line means the request arrived, and the lines after it give the reason if no reply was sent (for example, the device is unknown or has no deployment). No line means the request never reached the server.
 
+**Check the deployment and the distribution point settings:**
+
+- The device has a task sequence available for PXE: it is in a collection with a PXE-enabled deployment, or it is a new device covered by the All Unknown Computers deployment (unknown computer support is on for the distribution point). ConfigMgr's PXE server only answers a device that has a deployment available (SMSPXE.log: "no advertisements found" and "Not serviced").
+- The boot image is distributed to the distribution point and is set to deploy from the PXE-enabled distribution point.
+- If every device suddenly fails after a site recovery or move, check SMSPXE.log for an expired certificate (error 800B0101) and Distmgr.log for "Failed to get the encrypted PXE password". The distribution point requires a PXE password. The fix is to clear the PXE password setting temporarily, confirm the certificate updates, then set the password again.
+- A distribution point with a self-signed certificate creates files under C:\ProgramData\Microsoft\Crypto\RSA\S-1-5-18 for every PXE request, including test runs and retries. Check the folder size and free disk space. Microsoft's article is for the 2012 product, so confirm it still applies.
+- If imaging is slow, test the boot image download speed: run the test script with -AdditionalTftpFiles pointing at the boot image WIM (for example SMSImages\<package ID>\boot.<package ID>.wim).
+
 ## Step 8: Escalate to the EEA team
 
 Create an Incident ticket for the EEA team for a single-device failure, or for any failure after the boot image loads. Include:
 
-- What troubleshooting has been done, and the result of each step.
+- What troubleshooting has been done, and the result of each step. Include the test script output if you ran it (Step 7).
 - The exact error text and code, and the step it happened at. A photo of the screen is best.
 - Device model and serial number, MAC address, and BIOS version.
 - Site, VLAN or subnet, switch port, and the time of the failure.
