@@ -1,6 +1,6 @@
 # DHCP-PXE-TFTP-Test.ps1: recommended actions text
 
-Source: `SCCM/DHCP-PXE-TFTP-Test.ps1` v1.16.0 (2026-10-01), lines 1199-1369. This is a copy for reviewing the wording; the script is the master, so update this file when the text changes.
+Source: `SCCM/DHCP-PXE-TFTP-Test.ps1` v1.17.0 (2026-10-08), lines 1201-1367. This is a copy for reviewing the wording; the script is the master, so update this file when the text changes.
 
 Text is verbatim. Words starting with `$` are filled in when the script runs (for example `$pxeIp` is the PXE server's IP, `$subText` the subnet, `$gwWhere` is "Router <gateway> (interface for <subnet>)", `$when` the time the test started, `$macText` the test MAC).
 
@@ -14,21 +14,21 @@ Each item prints as:
 
 ## DHCP
 
-### 1. No DHCP or PXE server answered at all (line 1209)
+### 1. No DHCP or PXE server answered at all (line 1211)
 
 - **Priority:** HIGH
 - **Where:** Router for this subnet
-- **Fix:** Check the IP helper / DHCP relay on this subnet's router points to the DHCP server, and that the scope exists and is active.
+- **Fix:** Check the IP helper on this subnet's router points to the DHCP server, and that the scope exists and is active.
 - **Why:** No DHCP server answered. (Also confirm this PC is on the subnet you meant to test and its firewall allows inbound UDP 68.)
 
-### 2. A PXE server answered but no DHCP server offered an address (line 1214)
+### 2. A PXE server answered but no DHCP server offered an address (line 1216)
 
 - **Priority:** HIGH
 - **Where:** DHCP scope for this subnet
 - **Fix:** Check the scope exists, is active and has free addresses, and that the router's IP helper includes the DHCP server.
 - **Why:** A PXE server answered but no DHCP server offered an address.
 
-### 3. More than one DHCP server offered an address (line 1220)
+### 3. More than one DHCP server offered an address (line 1222)
 
 - **Priority:** MEDIUM
 - **Where:** DHCP for $subText
@@ -37,60 +37,60 @@ Each item prints as:
 
 ## PXE broadcast / DHCP relay (IP helper)
 
-### 4. PXE server is on this subnet and answered on UDP 4011, but not the broadcast (line 1233)
+### 4. PXE server is on this subnet and answered on UDP 4011, but not the broadcast (line 1235)
 
 - **Priority:** LOW
 - **Where:** PXE server $pxeIp
-- **Fix:** If a real PXE client on this subnet boots, no action is needed. Otherwise check SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText, and that this PC's firewall allows inbound UDP 68 (run the script again with a rule allowing it for powershell.exe).
-- **Why:** $pxeIp is on this subnet and answered on UDP 4011, but sent no reply to this script's broadcast DISCOVER. That can be a false alarm: a real PXE ROM sends from IP 0.0.0.0, while this script sends from a PC that already has an address, which the PXE Responder may ignore.
+- **Fix:** If a real PXE client on this subnet boots, no action is needed. Otherwise check with Regional Network that the server port is 'Trusted'; if it is, ask the SCCM/Server Admin to check SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText.
+- **Why:** $pxeIp is on this subnet and answered on UDP 4011, but sent no reply to this script's broadcast DISCOVER. Either the switch port for the server is not 'Trusted', or SCCM is not replying to the DISCOVER.
 
-### 5. PXE server is on this subnet and answered nothing (line 1238)
+### 5. PXE server is on this subnet and answered nothing (line 1240)
 
 - **Priority:** HIGH
 - **Where:** PXE server $pxeIp
-- **Fix:** Check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log.
+- **Fix:** Contact the SCCM/Server Team to check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log.
 - **Why:** $pxeIp is on this subnet but didn't answer the PXE broadcast or the request on UDP 4011.
 
-### 6. PXE server answered the direct relay-style test but not the relayed broadcast (line 1244)
+### 6. PXE server answered the direct relay-style test but not the relayed broadcast (line 1246)
 
 - **Priority:** HIGH
 - **Where:** $gwWhere
-- **Fix:** Check the DHCP relay (IP helper) on the interface for $subText forwards to $pxeIp$alongside, and add it if missing. If it's already listed, check that nothing between $gwName and $pxeIp (ACLs, firewalls, the DP's own firewall) blocks UDP 67 in either direction, and that the relay sends to all its servers rather than only the first one that answers.
+- **Fix:** Ask Regional Network to check the IP helper on the interface for $subText forwards to $pxeIp$alongside, and add it if missing.
 - **Why:** PXE server $pxeIp answered a relay-style request sent to it directly from this PC, but never answered the broadcast relayed by $gwName. So the PXE server is fine and the relay path from this subnet to it isn't working. (SMSPXE.log on $pxeIp will show no 'Packet from' line for MAC $macText around $when if the relayed request isn't arriving.)
 
-### 7. PXE server answered neither the relayed broadcast nor the direct relay test (line 1251)
+### 7. PXE server answered neither the relayed broadcast nor the direct relay test (line 1253)
 
 - **Priority:** HIGH
 - **Where:** PXE server $pxeIp / path from $subText
-- **Fix:** Look in SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText. If there are none, UDP 67 from $subText isn't reaching ${pxeIp}: check ACLs/firewalls (including the DP's own firewall) and the relay on $gwName. If they're there but no reply was sent, the log says why (e.g. device unknown, no deployment).
-- **Why:** $pxeIp answered neither the broadcast relayed by $gwName nor a relay-style request sent to it directly$also.
+- **Fix:** Contact the SCCM/Server Team to check the SCCM server.
+- **Why:** $pxeIp answered neither the broadcast relayed by $gwName nor a relay-style request sent to it directly$also. This suggests an issue with the SCCM server.
 
-### 8. No PXE answer to the broadcast, relay test skipped (-SkipRelayTest) (line 1257)
+### 8. No PXE answer to the broadcast, relay test skipped (-SkipRelayTest) (line 1259)
 
 - **Priority:** HIGH
 - **Where:** $gwWhere
-- **Fix:** Make sure the DHCP relay (IP helper) on the interface for $subText forwards to $pxeIp$alongside. If it already does, check SMSPXE.log on $pxeIp around $when for MAC $macText to see whether the relayed request arrives, and check ACLs/firewalls for UDP 67 between $gwName and $pxeIp.
+- **Fix:** Ask Regional Network to make sure the IP helper on the interface for $subText forwards to $pxeIp$alongside. If it already does, ask the SCCM/Server Team to check SMSPXE.log on $pxeIp around $when for MAC $macText to see whether the relayed request arrives, and check ACLs/firewalls for UDP 67 between $gwName and $pxeIp.
 - **Why:** No PXE server answered the broadcast relayed from this subnet. (The relay test was skipped, so it's not known whether the problem is the relay path or the PXE server.)
 
-### 9. No PXE answer and DHCP doesn't point to a PXE server (line 1262)
+### 9. No PXE answer and DHCP doesn't point to a PXE server (line 1264)
 
 - **Priority:** HIGH
 - **Where:** $gwWhere
-- **Fix:** Make sure the DHCP relay (IP helper) for $subText forwards to the PXE-enabled distribution point that should serve this office. Rerun with -PxeServer <DP IP> to test that DP directly.
+- **Fix:** Contact Regional Network to make sure the IP helper for $subText forwards to the SCCM server that should serve this office. You can rerun with -PxeServer <DP IP> to test that DP directly.
 - **Why:** No PXE server answered, and DHCP doesn't point to one.
 
 ## PXE response delay
 
-### 10. A PXE server answered the broadcast only after 4 s or more (response delay) (line 1271)
+### 10. A PXE server answered the broadcast only after 4 s or more (response delay) (line 1273)
 
 - **Priority:** LOW
 - **Where:** PXE server $who
-- **Fix:** If this isn't deliberate, set the PXE response delay on the distribution point to 0 (distribution point properties, PXE tab). Only use a delay when several PXE servers answer the same subnet and one should win.
+- **Fix:** Our PXE response delay is set to 10 s.
 - **Why:** $who answered the broadcast only after $([math]::Round($po.ElapsedMs / 1000, 1)) s. A PXE server with a response delay ignores each DISCOVER until the client's elapsed time reaches the delay (SMSPXE.log: 'Response delay is N. Ignoring request.'), so real clients wait that long before PXE starts.
 
 ## DHCP options 060/066/067
 
-### 11. Options 060/066/067 are set on the DHCP scope (line 1285)
+### 11. Options 060/066/067 are set on the DHCP scope (line 1287)
 
 - **Priority:** HIGH
 - **Where:** `$dhcpWhere` = "DHCP server <server>, scope <subnet>" (or "DHCP scope for <subnet>")
@@ -102,14 +102,14 @@ Each item prints as:
 
 ## PXE server answers
 
-### 12. A PXE server didn't answer on UDP 4011 (LOW if another PXE server worked, else HIGH) (line 1291)
+### 12. A PXE server didn't answer on UDP 4011 (LOW if another PXE server worked, else HIGH) (line 1293)
 
 - **Priority:** $prio
 - **Where:** PXE server $($c.Server)
-- **Fix:** Check SMSPXE.log on $($c.Server) for MAC $macText. Usual causes: the device is unknown and unknown computer support is off, it has no PXE-enabled deployment, or UDP 4011 is blocked between $subText and $($c.Server).
+- **Fix:** Contact the SCCM/Server Team: the SCCM server did not respond to the PXE request.
 - **Why:** It didn't answer the PXE request on UDP 4011 (found via: $($c.FoundVia)).
 
-### 13. PXE server returned abortpxe (no deployment for this device) (line 1296)
+### 13. PXE server returned abortpxe (no deployment for this device) (line 1298)
 
 - **Priority:** MEDIUM
 - **Where:** ConfigMgr deployments
@@ -118,35 +118,35 @@ Each item prints as:
 
 ## TFTP
 
-### 14. TFTP worked but needed retries or saw out-of-order packets (line 1306)
+### 14. TFTP worked but needed retries or saw out-of-order packets (line 1308)
 
 - **Priority:** LOW
 - **Where:** Network path $subText -> $($r.Server)
 - **Fix:** Check for packet loss on the path (interface errors, duplex mismatch, congested WAN link). If it persists, lower the TFTP block size in the DP's PXE settings.
 - **Why:** TFTP needed $($r.Timeouts) retries and saw $($r.OutOfOrder) out-of-order packets downloading '$($r.File)'.
 
-### 15. TFTP server didn't respond at all (line 1314)
+### 15. TFTP server didn't respond at all (line 1316)
 
 - **Priority:** HIGH
-- **Where:** Firewalls / ACLs between $subText and $($r.Server)
-- **Fix:** Allow UDP 69 and the high UDP ports TFTP uses for data from $subText to $($r.Server), and check the PXE service is running on $($r.Server).
+- **Where:** SCCM Server - $($r.Server)
+- **Fix:** Contact the SCCM/Server Team: likely an issue with TFTP on the SCCM server.
 - **Why:** The TFTP server didn't respond at all: $e
 
-### 16. TFTP transfer started but stalled or the size was wrong (line 1319)
+### 16. TFTP transfer started but stalled or the size was wrong (line 1321)
 
 - **Priority:** MEDIUM
 - **Where:** Network path $subText -> $($r.Server)
 - **Fix:** Check for packet loss or MTU problems on the path. Rerun with a smaller -TftpBlockSize (e.g. 1024) to compare, and make sure ACLs allow the high UDP ports for the whole transfer.
 - **Why:** The TFTP transfer of '$($r.File)' started but didn't finish: $e
 
-### 17. PXE server can't serve the boot file it handed out (line 1327)
+### 17. PXE server can't serve the boot file it handed out (line 1329)
 
 - **Priority:** HIGH
 - **Where:** PXE server $($r.Server)
 - **Fix:** Redistribute the boot image to this DP, check 'Deploy this boot image from the PXE-enabled distribution point' is ticked, restart the PXE service and review SMSPXE.log.
 - **Why:** The PXE server can't serve the boot file it handed out ('$($r.File)'): $e
 
-### 18. Any other TFTP download failure (line 1332)
+### 18. Any other TFTP download failure (line 1334)
 
 - **Priority:** LOW
 - **Where:** TFTP server $($r.Server)
