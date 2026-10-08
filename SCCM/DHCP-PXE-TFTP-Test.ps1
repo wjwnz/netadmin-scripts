@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.16.0   (2026-10-01)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.17.0   (2026-10-08)
 #
+#  1.17.0 Recommended actions reworded to say which team to contact (Regional Network for the IP helper
+#         and switch ports, the SCCM/Server Team for the PXE/TFTP server). Response-delay item notes ours is 10 s,
+#         and now only appears when the PXE answer took 20 s or more, so our normal 10 s delay no longer flags it.
 #  1.16.0 Everything shown on the console is also written to a log file named
 #         DHCP-PXE-TFTP-Test_<computer>_<yyyyMMdd-HHmmss>.log in the folder the script is run from (the current
 #         folder). -LogPath sets a different folder or file; -NoLog turns logging off. If the log cannot be
@@ -258,7 +261,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.16.0'
+$ScriptVersion = '1.17.0'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
@@ -1207,7 +1210,7 @@ if (-not $TftpOnly) {
     # --- DHCP
     if ($offers.Count -eq 0) {
         Add-Action 'HIGH' "Router for this subnet" `
-            "Check the IP helper / DHCP relay on this subnet's router points to the DHCP server, and that the scope exists and is active." `
+            "Check the IP helper on this subnet's router points to the DHCP server, and that the scope exists and is active." `
             "No DHCP server answered. (Also confirm this PC is on the subnet you meant to test and its firewall allows inbound UDP 68.)"
     }
     elseif ($leaseOffers.Count -eq 0) {
@@ -1231,45 +1234,46 @@ if (-not $TftpOnly) {
         $when = $runStart.ToString('HH:mm:ss')
         if ($pxeIp -and (Test-InSubnet $pxeIp $sub) -and $chk -and $chk.Answered) {
             Add-Action 'LOW' "PXE server $pxeIp" `
-                "If a real PXE client on this subnet boots, no action is needed. Otherwise check SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText, and that this PC's firewall allows inbound UDP 68 (run the script again with a rule allowing it for powershell.exe)." `
-                "$pxeIp is on this subnet and answered on UDP 4011, but sent no reply to this script's broadcast DISCOVER. That can be a false alarm: a real PXE ROM sends from IP 0.0.0.0, while this script sends from a PC that already has an address, which the PXE Responder may ignore."
+                "If a real PXE client on this subnet boots, no action is needed. Otherwise check with Regional Network that the server port is 'Trusted'; if it is, ask the SCCM/Server Admin to check SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText." `
+                "$pxeIp is on this subnet and answered on UDP 4011, but sent no reply to this script's broadcast DISCOVER. Either the switch port for the server is not 'Trusted', or SCCM is not replying to the DISCOVER."
         }
         elseif ($pxeIp -and (Test-InSubnet $pxeIp $sub)) {
             Add-Action 'HIGH' "PXE server $pxeIp" `
-                "Check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log." `
+                "Contact the SCCM/Server Team to check the PXE Responder service (SccmPxe) is running on $pxeIp and review SMSPXE.log." `
                 "$pxeIp is on this subnet but didn't answer the PXE broadcast or the request on UDP 4011."
         }
         elseif ($pxeIp -and $chk -and $chk.RelayAnswered) {
             $ipHelperAction = $true
             Add-Action 'HIGH' $gwWhere `
-                "Check the DHCP relay (IP helper) on the interface for $subText forwards to $pxeIp$alongside, and add it if missing. If it's already listed, check that nothing between $gwName and $pxeIp (ACLs, firewalls, the DP's own firewall) blocks UDP 67 in either direction, and that the relay sends to all its servers rather than only the first one that answers." `
+                "Ask Regional Network to check the IP helper on the interface for $subText forwards to $pxeIp$alongside, and add it if missing." `
                 "PXE server $pxeIp answered a relay-style request sent to it directly from this PC, but never answered the broadcast relayed by $gwName. So the PXE server is fine and the relay path from this subnet to it isn't working. (SMSPXE.log on $pxeIp will show no 'Packet from' line for MAC $macText around $when if the relayed request isn't arriving.)"
         }
         elseif ($pxeIp -and $chk -and $chk.RelayTested) {
             $ipHelperAction = $true
             $also = if ($chk.Answered) { ", although it did answer on UDP 4011" } else { '' }
             Add-Action 'HIGH' "PXE server $pxeIp / path from $subText" `
-                "Look in SMSPXE.log on $pxeIp around $when for 'Packet from' lines with MAC $macText. If there are none, UDP 67 from $subText isn't reaching ${pxeIp}: check ACLs/firewalls (including the DP's own firewall) and the relay on $gwName. If they're there but no reply was sent, the log says why (e.g. device unknown, no deployment)." `
-                "$pxeIp answered neither the broadcast relayed by $gwName nor a relay-style request sent to it directly$also."
+                "Contact the SCCM/Server Team to check the SCCM server." `
+                "$pxeIp answered neither the broadcast relayed by $gwName nor a relay-style request sent to it directly$also. This suggests an issue with the SCCM server."
         }
         elseif ($pxeIp) {
             $ipHelperAction = $true
             Add-Action 'HIGH' $gwWhere `
-                "Make sure the DHCP relay (IP helper) on the interface for $subText forwards to $pxeIp$alongside. If it already does, check SMSPXE.log on $pxeIp around $when for MAC $macText to see whether the relayed request arrives, and check ACLs/firewalls for UDP 67 between $gwName and $pxeIp." `
+                "Ask Regional Network to make sure the IP helper on the interface for $subText forwards to $pxeIp$alongside. If it already does, ask the SCCM/Server Team to check SMSPXE.log on $pxeIp around $when for MAC $macText to see whether the relayed request arrives, and check ACLs/firewalls for UDP 67 between $gwName and $pxeIp." `
                 "No PXE server answered the broadcast relayed from this subnet. (The relay test was skipped, so it's not known whether the problem is the relay path or the PXE server.)"
         }
         else {
             Add-Action 'HIGH' $gwWhere `
-                "Make sure the DHCP relay (IP helper) for $subText forwards to the PXE-enabled distribution point that should serve this office. Rerun with -PxeServer <DP IP> to test that DP directly." `
+                "Contact Regional Network to make sure the IP helper for $subText forwards to the SCCM server that should serve this office. You can rerun with -PxeServer <DP IP> to test that DP directly." `
                 "No PXE server answered, and DHCP doesn't point to one."
         }
     }
 
-    # --- PXE response delay (server ignores early DISCOVERs)
-    foreach ($po in ($proxyOffers | Where-Object { $_.ElapsedMs -ge 4000 })) {
+    # --- PXE response delay (server ignores early DISCOVERs). Our 10 s delay is answered at the 12 s resend, so only
+    # flag servers that weren't answering until the 28 s resend.
+    foreach ($po in ($proxyOffers | Where-Object { $_.ElapsedMs -ge 20000 })) {
         $who = if ($po.ServerIdentifier) { $po.ServerIdentifier } else { $po.SourceIP }
         Add-Action 'LOW' "PXE server $who" `
-            "If this isn't deliberate, set the PXE response delay on the distribution point to 0 (distribution point properties, PXE tab). Only use a delay when several PXE servers answer the same subnet and one should win." `
+            "Our PXE response delay is set to 10 s." `
             "$who answered the broadcast only after $([math]::Round($po.ElapsedMs / 1000, 1)) s. A PXE server with a response delay ignores each DISCOVER until the client's elapsed time reaches the delay (SMSPXE.log: 'Response delay is N. Ignoring request.'), so real clients wait that long before PXE starts."
     }
 
@@ -1289,7 +1293,7 @@ if (-not $TftpOnly) {
     foreach ($c in ($pxeChecks | Where-Object { -not $_.Answered })) {
         $prio = if ($goodPxe) { 'LOW' } else { 'HIGH' }
         Add-Action $prio "PXE server $($c.Server)" `
-            "Check SMSPXE.log on $($c.Server) for MAC $macText. Usual causes: the device is unknown and unknown computer support is off, it has no PXE-enabled deployment, or UDP 4011 is blocked between $subText and $($c.Server)." `
+            "Contact the SCCM/Server Team: the SCCM server did not respond to the PXE request." `
             "It didn't answer the PXE request on UDP 4011 (found via: $($c.FoundVia))."
     }
     foreach ($c in ($pxeChecks | Where-Object { $_.Answered -and $_.BootFile -match 'abortpxe' })) {
@@ -1311,8 +1315,8 @@ foreach ($r in $tftpResults) {
     }
     $e = [string]$r.Error
     if ($e -match 'No response') {
-        Add-Action 'HIGH' "Firewalls / ACLs between $subText and $($r.Server)" `
-            "Allow UDP 69 and the high UDP ports TFTP uses for data from $subText to $($r.Server), and check the PXE service is running on $($r.Server)." `
+        Add-Action 'HIGH' "SCCM Server - $($r.Server)" `
+            "Contact the SCCM/Server Team: likely an issue with TFTP on the SCCM server." `
             "The TFTP server didn't respond at all: $e"
     }
     elseif ($e -match 'stalled|Size mismatch') {
