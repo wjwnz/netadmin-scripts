@@ -3,7 +3,8 @@
 #  DHCP-PXE-TFTP-Test.ps1   Version 1.17.0   (2026-10-08)
 #
 #  1.17.0 Recommended actions reworded to say which team to contact (Regional Network for the IP helper
-#         and switch ports, the SCCM/Server Team for the PXE/TFTP server). Response-delay item notes ours is 10 s.
+#         and switch ports, the SCCM/Server Team for the PXE/TFTP server). Response-delay item notes ours is 10 s,
+#         and now only appears when the PXE answer took 20 s or more, so our normal 10 s delay no longer flags it.
 #  1.16.0 Everything shown on the console is also written to a log file named
 #         DHCP-PXE-TFTP-Test_<computer>_<yyyyMMdd-HHmmss>.log in the folder the script is run from (the current
 #         folder). -LogPath sets a different folder or file; -NoLog turns logging off. If the log cannot be
@@ -1267,8 +1268,9 @@ if (-not $TftpOnly) {
         }
     }
 
-    # --- PXE response delay (server ignores early DISCOVERs)
-    foreach ($po in ($proxyOffers | Where-Object { $_.ElapsedMs -ge 4000 })) {
+    # --- PXE response delay (server ignores early DISCOVERs). Our 10 s delay is answered at the 12 s resend, so only
+    # flag servers that weren't answering until the 28 s resend.
+    foreach ($po in ($proxyOffers | Where-Object { $_.ElapsedMs -ge 20000 })) {
         $who = if ($po.ServerIdentifier) { $po.ServerIdentifier } else { $po.SourceIP }
         Add-Action 'LOW' "PXE server $who" `
             "Our PXE response delay is set to 10 s." `
