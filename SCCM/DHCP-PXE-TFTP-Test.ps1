@@ -1,8 +1,10 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  DHCP-PXE-TFTP-Test.ps1   Version 1.17.0   (2026-10-08)
+#  DHCP-PXE-TFTP-Test.ps1   Version 1.18.0   (2026-10-09)
 #  Maintained by Bill Walker (Christchurch)
 #
+#  1.18.0 Log file renamed to PXELog_<computer>_<yyyyMMdd-HHmmss>.log (was DHCP-PXE-TFTP-Test_...), so typing
+#         .\D and Tab in the script's folder finds the script instead of cycling through old logs.
 #  1.17.0 Recommended actions reworded to say which team to contact (Regional Network for the IP helper
 #         and switch ports, the SCCM/Server Team for the PXE/TFTP server). Response-delay item notes ours is 10 s,
 #         and now only appears when the PXE answer took 20 s or more, so our normal 10 s delay no longer flags it.
@@ -202,7 +204,7 @@
 
 .PARAMETER LogPath
     Where to save the log of the console output. A folder gets a file named
-    DHCP-PXE-TFTP-Test_<computer>_<yyyyMMdd-HHmmss>.log; a path with a file extension is used as the log file
+    PXELog_<computer>_<yyyyMMdd-HHmmss>.log; a path with a file extension is used as the log file
     (appended to). Default: the folder the script is run from (the current folder).
 
 .PARAMETER NoLog
@@ -264,7 +266,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.17.0'
+$ScriptVersion = '1.18.0'
 $ErrorActionPreference = 'Stop'
 # A PXE ROM retransmits its DISCOVER after 4, 8, 16 and 32 s; these are the elapsed times of the resends
 $DiscoverResendAt = if ($NoDiscoverResend) { @() } else { @(4, 12, 28) }
@@ -339,7 +341,7 @@ function Write-LogSummary {
 }
 
 if (-not $NoLog) {
-    $logName = 'DHCP-PXE-TFTP-Test_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $logName = 'PXELog_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd-HHmmss')
     $logTarget = $null
     try {
         $logTarget = if (-not $LogPath) { Join-Path (Get-Location).Path $logName }
