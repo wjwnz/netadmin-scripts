@@ -1,6 +1,7 @@
 #Requires -Version 5.1
 # ==============================================================================
 #  DHCP-PXE-TFTP-Test.ps1   Version 1.17.0   (2026-10-08)
+#  Maintained by Bill Walker (Christchurch)
 #
 #  1.17.0 Recommended actions reworded to say which team to contact (Regional Network for the IP helper
 #         and switch ports, the SCCM/Server Team for the PXE/TFTP server). Response-delay item notes ours is 10 s,
@@ -224,6 +225,8 @@
     .\DHCP-PXE-TFTP-Test.ps1 -MacAddressString 00-11-22-33-44-55 -UUIDString 4C4C4544-0000-1000-8000-000000000000 -ReportPath \\server\share\PXE-Results.csv
 
 .NOTES
+    Maintained by Bill Walker (Christchurch).
+
     - Run from a client on the subnet you want to test (not on the DHCP server or DP itself: they already own
       UDP 67/68/4011). A normal PowerShell window is enough; if binding UDP 67/68 is refused, try elevated.
     - Local firewall must allow inbound UDP 68 and replies from the TFTP server.
