@@ -1,8 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  GlobalProtect-Redirect-Test.ps1   Version 1.1.0   (2026-10-28)
+#  GlobalProtect-Redirect-Test.ps1   Version 1.1.1   (2026-10-28)
 #  Maintained by Bill Walker (Christchurch)
 #
+#  1.1.1  The results CSV column for the redirect header is now RedirectLocation (was Location), so an input CSV with
+#         its own Location column (e.g. the site name) keeps it. Any other result column whose name the input CSV
+#         already uses gets a 'Test' prefix instead of overwriting the input column.
 #  1.1.0  Addresses are tested 20 at a time (-Parallel), so a list of several hundred takes minutes instead of an
 #         hour or more when many of them do not answer. Results print as they finish; the results CSV keeps the
 #         order of the input CSV. Added -Parallel (1 = one at a time, as before).
@@ -135,7 +138,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.1.1'
 $ErrorActionPreference = 'Stop'
 # Address columns -CsvPath looks for, in order, when -IpColumn is not given
 $IpColumnNames = 'IP', 'IPAddress', 'IP Address', 'IP_Address', 'Address', 'Host', 'HostName', 'Host Name', 'Target'
@@ -412,7 +415,7 @@ function Test-Target([string]$HostName, [int]$TargetPort) {
         Port            = $TargetPort
         HttpStatus      = $(if ($first) { $first.Status } else { '' })
         Redirect        = $(if ($how) { $how } else { '' })
-        Location        = $(if ($first -and $first.Location) { $first.Location } else { '' })
+        RedirectLocation = $(if ($first -and $first.Location) { $first.Location } else { '' })
         RedirectChain   = ($chain -join ' | ')
         FinalStatus     = $(if ($last) { $last.Status } else { '' })
         Server          = $(if ($first -and $first.Server) { $first.Server } else { '' })
@@ -516,6 +519,7 @@ try {
 
     # Print each result as it finishes; the results CSV keeps the input order
     $byIndex = New-Object object[] $targets.Count
+    $tests = New-Object object[] $targets.Count     # the test results alone, for the summary
     $i = 0
     while ($i -lt $targets.Count) {
         $finished = @($jobs | Where-Object { -not $_.Done -and $_.Handle.IsCompleted })
@@ -528,7 +532,7 @@ try {
             try { $r = @($j.PS.EndInvoke($j.Handle))[0] } catch { }
             if (-not $r) {
                 $why = if ($j.PS.Streams.Error.Count) { "$($j.PS.Streams.Error[0])" } else { 'test did not return a result' }
-                $r = [pscustomobject]@{ Result = 'ERROR'; Port = $t.Port; HttpStatus = ''; Redirect = ''; Location = ''; RedirectChain = ''
+                $r = [pscustomobject]@{ Result = 'ERROR'; Port = $t.Port; HttpStatus = ''; Redirect = ''; RedirectLocation = ''; RedirectChain = ''
                     FinalStatus = ''; Server = ''; CertSubject = ''; CertIssuer = ''; CertExpires = ''; CertErrors = ''; Error = $why; Ms = 0 }
             }
             $j.PS.Dispose()
@@ -546,11 +550,16 @@ try {
                 Write-Host ("  {0,-17}{1,-$hostWidth} cert {2}, expires {3}{4}" -f '', '', $r.CertSubject, $r.CertExpires, $ce) -ForegroundColor DarkGray
             }
 
-            # Results CSV row: the input row's own columns first, then the results
+            # Results CSV row: the input row's own columns first, then the results. A result column whose name the input
+            # CSV already uses (e.g. Result) gets a 'Test' prefix, so the input column is never overwritten.
             $out = [ordered]@{ Address = $t.Host }
             if ($t.Row) { foreach ($c in $extraColumns) { $out[$c] = $t.Row.$c } }
-            foreach ($p in $r.PSObject.Properties) { $out[$p.Name] = $p.Value }
+            foreach ($p in $r.PSObject.Properties) {
+                $name = if ($out.Contains($p.Name)) { "Test$($p.Name)" } else { $p.Name }
+                $out[$name] = $p.Value
+            }
             $byIndex[$j.Index] = [pscustomobject]$out
+            $tests[$j.Index] = $r
         }
     }
 }
@@ -569,7 +578,7 @@ Write-Host ("=" * 78) -ForegroundColor DarkCyan
 Write-Host " Summary" -ForegroundColor Cyan
 Write-Host ("=" * 78) -ForegroundColor DarkCyan
 foreach ($name in 'PASS', 'WRONG', 'NO-REDIR', 'ERROR') {
-    $n = @($results | Where-Object Result -eq $name).Count
+    $n = @($tests | Where-Object Result -eq $name).Count
     $label = switch ($name) {
         'PASS'     { "redirect to $ExpectedPath" }
         'WRONG'    { 'redirect somewhere else' }
@@ -579,14 +588,14 @@ foreach ($name in 'PASS', 'WRONG', 'NO-REDIR', 'ERROR') {
     $c = if ($n) { $colors[$name] } else { 'DarkGray' }
     Write-Host ("  {0,-8} {1,4}  {2}" -f $name, $n, $label) -ForegroundColor $c
 }
-if (@($results | Where-Object Result -ne 'PASS')) {
+if (@($tests | Where-Object Result -ne 'PASS')) {
     Write-Host ""
     Write-Host "  Not redirecting to the login page:" -ForegroundColor Yellow
-    for ($k = 0; $k -lt $results.Count; $k++) {
-        $r = $results[$k]
+    for ($k = 0; $k -lt $tests.Count; $k++) {
+        $r = $tests[$k]
         if ($r.Result -eq 'PASS') { continue }
         $lbl = if ($targets[$k].Label) { "  ($($targets[$k].Label))" } else { '' }
-        Write-Host ("    {0,-8} {1}:{2}{3}" -f $r.Result, $r.Address, $r.Port, $lbl) -ForegroundColor $colors[$r.Result]
+        Write-Host ("    {0,-8} {1}:{2}{3}" -f $r.Result, $targets[$k].Host, $targets[$k].Port, $lbl) -ForegroundColor $colors[$r.Result]
     }
 }
 
