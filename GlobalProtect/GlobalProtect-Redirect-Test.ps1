@@ -1,8 +1,11 @@
 #Requires -Version 5.1
 # ==============================================================================
-#  GlobalProtect-Redirect-Test.ps1   Version 1.0.0   (2026-10-28)
+#  GlobalProtect-Redirect-Test.ps1   Version 1.1.0   (2026-10-28)
 #  Maintained by Bill Walker (Christchurch)
 #
+#  1.1.0  Addresses are tested 20 at a time (-Parallel), so a list of several hundred takes minutes instead of an
+#         hour or more when many of them do not answer. Results print as they finish; the results CSV keeps the
+#         order of the input CSV. Added -Parallel (1 = one at a time, as before).
 #  1.0.0  Initial: reads a CSV of IP addresses, connects to each over HTTPS and reports whether it redirects
 #         to /global-protect/login.esp (a Palo Alto GlobalProtect portal or gateway login page).
 # ==============================================================================
@@ -61,6 +64,10 @@
 .PARAMETER MaxRedirects
     Most redirects to follow for each target (default 5).
 
+.PARAMETER Parallel
+    How many addresses to test at the same time (default 20). An address that does not answer costs the whole
+    -TimeoutSeconds, so testing one at a time (-Parallel 1) can take a long time on a big list.
+
 .PARAMETER NoProxy
     Connect straight to each address, ignoring the proxy set in Windows. Without it the requests use the same proxy
     as the browser, so on a network with a web proxy the result shows what the proxy can reach.
@@ -118,6 +125,7 @@ Param(
     [String]$ExpectedPath = '/global-protect/login.esp',
     [ValidateRange(1, 300)][int]$TimeoutSeconds = 10,
     [ValidateRange(0, 20)][int]$MaxRedirects = 5,
+    [ValidateRange(1, 100)][int]$Parallel = 20,
     [switch]$NoProxy,
     [String]$OutputCsv,
     [switch]$NoOutputCsv,
@@ -127,7 +135,7 @@ Param(
     [Alias('h')][switch]$Help
 )
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 $ErrorActionPreference = 'Stop'
 # Address columns -CsvPath looks for, in order, when -IpColumn is not given
 $IpColumnNames = 'IP', 'IPAddress', 'IP Address', 'IP_Address', 'Address', 'Host', 'HostName', 'Host Name', 'Target'
@@ -236,18 +244,31 @@ Write-Host "GlobalProtect redirect test v$ScriptVersion - $(Get-Date -Format 'yy
 #region ---------------------------------------------------------------- Helpers
 
 # Certificate check for this script's requests only: accept any certificate (it is issued for a name, not the IP
-# being tested) but remember what was presented, so it can be reported.
-if (-not ('GpRedirectTestTls' -as [type])) {
+# being tested) but remember what each request was shown, so it can be reported. Requests run in parallel, so the
+# certificate is kept per request (the callback's sender is the request).
+if (-not ('GpRedirectTestCert' -as [type])) {
     Add-Type -TypeDefinition @'
 using System.Net.Security;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography.X509Certificates;
-public static class GpRedirectTestTls {
-    public static X509Certificate2 LastCertificate;
-    public static SslPolicyErrors LastErrors;
+public sealed class GpCertSeen {
+    public X509Certificate2 Certificate;
+    public SslPolicyErrors Errors;
+}
+public static class GpRedirectTestCert {
+    static readonly ConditionalWeakTable<object, GpCertSeen> seen = new ConditionalWeakTable<object, GpCertSeen>();
     public static bool Accept(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
-        LastCertificate = cert == null ? null : new X509Certificate2(cert);
-        LastErrors = errors;
+        if (sender != null) {
+            GpCertSeen s = new GpCertSeen();
+            s.Certificate = cert == null ? null : new X509Certificate2(cert);
+            s.Errors = errors;
+            lock (seen) { seen.Remove(sender); seen.Add(sender, s); }
+        }
         return true;
+    }
+    public static GpCertSeen Get(object request) {
+        GpCertSeen s;
+        lock (seen) { return request != null && seen.TryGetValue(request, out s) ? s : null; }
     }
     public static readonly RemoteCertificateValidationCallback Callback = Accept;
 }
@@ -277,8 +298,6 @@ function Test-ExpectedPath([Uri]$Uri) { $Uri -and $Uri.AbsolutePath.TrimEnd('/')
 
 function Invoke-NoRedirectRequest([Uri]$Uri) {
     # One GET, redirects not followed. Returns the status, Location header, page start and certificate.
-    [GpRedirectTestTls]::LastCertificate = $null
-    [GpRedirectTestTls]::LastErrors = [Net.Security.SslPolicyErrors]::None
     $req = [Net.HttpWebRequest]::Create($Uri)
     $req.Method = 'GET'
     $req.AllowAutoRedirect = $false
@@ -287,7 +306,7 @@ function Invoke-NoRedirectRequest([Uri]$Uri) {
     $req.KeepAlive = $false
     if ($NoProxy) { $req.Proxy = $null }
     $req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GlobalProtect-Redirect-Test/$ScriptVersion"
-    $req.ServerCertificateValidationCallback = [GpRedirectTestTls]::Callback
+    $req.ServerCertificateValidationCallback = [GpRedirectTestCert]::Callback
     $resp = $null
     try {
         try { $resp = $req.GetResponse() }
@@ -305,13 +324,14 @@ function Invoke-NoRedirectRequest([Uri]$Uri) {
                 $body = New-Object string($buf, 0, $n)
             } catch { }
         }
+        $seen = [GpRedirectTestCert]::Get($req)
         [pscustomobject]@{
             Status   = [int]$resp.StatusCode
             Location = $resp.Headers['Location']
             Server   = $resp.Headers['Server']
             Body     = $body
-            Cert     = [GpRedirectTestTls]::LastCertificate
-            CertErr  = [GpRedirectTestTls]::LastErrors
+            Cert     = $(if ($seen) { $seen.Certificate } else { $null })
+            CertErr  = $(if ($seen) { $seen.Errors } else { [Net.Security.SslPolicyErrors]::None })
         }
     }
     finally { if ($resp) { $resp.Close() } }
@@ -456,7 +476,7 @@ if ($CsvPath) {
         $rowPort = $Port
         if ($portCol -and "$($row.$portCol)".Trim() -match '^\d+$') { $rowPort = [int]"$($row.$portCol)".Trim() }
         $hp = Split-HostPort $addr $rowPort
-            $label = if ($extraColumns) { "$($row.($extraColumns[0]))".Trim() } else { '' }
+        $label = if ($extraColumns) { "$($row.($extraColumns[0]))".Trim() } else { '' }
         $targets.Add([pscustomobject]@{ Input = $addr; Host = $hp.Host; Port = $hp.Port; Label = $label; Row = $row })
     }
 }
@@ -470,36 +490,78 @@ if ($targets.Count -eq 0) { throw "No addresses found to test" }
 
 # ---------------------------------------------------------- Test each target
 Write-Host ""
-Write-Host ("  Testing {0} address(es): GET https://<address>{1}, pass = redirect to {2}, timeout {3} s" -f $targets.Count, $Path, $ExpectedPath, $TimeoutSeconds) -ForegroundColor Cyan
+Write-Host ("  Testing {0} address(es), {1} at a time: GET https://<address>{2}, pass = redirect to {3}, timeout {4} s" -f $targets.Count, [Math]::Min($Parallel, $targets.Count), $Path, $ExpectedPath, $TimeoutSeconds) -ForegroundColor Cyan
 Write-Host ""
 $colors = @{ PASS = 'Green'; WRONG = 'Yellow'; 'NO-REDIR' = 'Yellow'; ERROR = 'Red' }
 $hostWidth = [Math]::Max(15, (($targets | ForEach-Object { "$($_.Host):$($_.Port)".Length }) | Measure-Object -Maximum).Maximum)
-$results = New-Object System.Collections.Generic.List[object]
-$i = 0
-foreach ($t in $targets) {
-    $i++
-    $r = Test-Target $t.Host $t.Port
 
-    $detail = switch ($r.Result) {
-        'PASS'     { "$($r.Redirect) to $ExpectedPath" + $(if ($r.RedirectChain -match '\|') { "  ($($r.RedirectChain))" } else { '' }) }
-        'WRONG'    { "redirects elsewhere: $($r.RedirectChain)" }
-        'NO-REDIR' { "HTTP $($r.HttpStatus), no redirect" }
-        'ERROR'    { $r.Error }
-    }
-    $lbl = if ($t.Label) { "  ($($t.Label))" } else { '' }
-    Write-Host ("  [{0,3}/{1}] {2,-8} {3,-$hostWidth} {4}{5}" -f $i, $targets.Count, $r.Result, "$($t.Host):$($t.Port)", $detail, $lbl) -ForegroundColor $colors[$r.Result]
-    if ($r.CertSubject) {
-        $ce = if ($r.CertErrors) { "  [$($r.CertErrors)]" } else { '' }
-        Write-Host ("  {0,-17}{1,-$hostWidth} cert {2}, expires {3}{4}" -f '', '', $r.CertSubject, $r.CertExpires, $ce) -ForegroundColor DarkGray
-    }
-
-    # Results CSV row: the input row's own columns first, then the results
-    $out = [ordered]@{ Address = $t.Host }
-    if ($t.Row) { foreach ($c in $extraColumns) { $out[$c] = $t.Row.$c } }
-    foreach ($p in $r.PSObject.Properties) { $out[$p.Name] = $p.Value }
-    $results.Add([pscustomobject]$out)
-
+# Each address is tested in its own runspace from a pool of -Parallel, with the test functions and settings copied in
+$iss = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+foreach ($f in 'Get-HostForUri', 'Test-ExpectedPath', 'Invoke-NoRedirectRequest', 'Get-ErrorText', 'Test-Target') {
+    $iss.Commands.Add((New-Object Management.Automation.Runspaces.SessionStateFunctionEntry($f, (Get-Command $f -CommandType Function).Definition)))
 }
+foreach ($v in 'Path', 'ExpectedPath', 'TimeoutSeconds', 'MaxRedirects', 'NoProxy', 'ScriptVersion', 'ErrorActionPreference') {
+    $iss.Variables.Add((New-Object Management.Automation.Runspaces.SessionStateVariableEntry($v, (Get-Variable $v -ValueOnly), $null)))
+}
+$pool = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($Parallel, $targets.Count), $iss, $Host)
+$pool.Open()
+$jobs = New-Object System.Collections.Generic.List[object]
+try {
+    for ($k = 0; $k -lt $targets.Count; $k++) {
+        $ps = [PowerShell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddCommand('Test-Target').AddArgument($targets[$k].Host).AddArgument($targets[$k].Port)
+        $jobs.Add([pscustomobject]@{ Index = $k; PS = $ps; Handle = $ps.BeginInvoke(); Done = $false })
+    }
+
+    # Print each result as it finishes; the results CSV keeps the input order
+    $byIndex = New-Object object[] $targets.Count
+    $i = 0
+    while ($i -lt $targets.Count) {
+        $finished = @($jobs | Where-Object { -not $_.Done -and $_.Handle.IsCompleted })
+        if (-not $finished) { Start-Sleep -Milliseconds 100; continue }
+        foreach ($j in $finished) {
+            $j.Done = $true
+            $i++
+            $t = $targets[$j.Index]
+            $r = $null
+            try { $r = @($j.PS.EndInvoke($j.Handle))[0] } catch { }
+            if (-not $r) {
+                $why = if ($j.PS.Streams.Error.Count) { "$($j.PS.Streams.Error[0])" } else { 'test did not return a result' }
+                $r = [pscustomobject]@{ Result = 'ERROR'; Port = $t.Port; HttpStatus = ''; Redirect = ''; Location = ''; RedirectChain = ''
+                    FinalStatus = ''; Server = ''; CertSubject = ''; CertIssuer = ''; CertExpires = ''; CertErrors = ''; Error = $why; Ms = 0 }
+            }
+            $j.PS.Dispose()
+
+            $detail = switch ($r.Result) {
+                'PASS'     { "$($r.Redirect) to $ExpectedPath" + $(if ($r.RedirectChain -match '\|') { "  ($($r.RedirectChain))" } else { '' }) }
+                'WRONG'    { "redirects elsewhere: $($r.RedirectChain)" }
+                'NO-REDIR' { "HTTP $($r.HttpStatus), no redirect" }
+                'ERROR'    { $r.Error }
+            }
+            $lbl = if ($t.Label) { "  ($($t.Label))" } else { '' }
+            Write-Host ("  [{0,3}/{1}] {2,-8} {3,-$hostWidth} {4}{5}" -f $i, $targets.Count, $r.Result, "$($t.Host):$($t.Port)", $detail, $lbl) -ForegroundColor $colors[$r.Result]
+            if ($r.CertSubject) {
+                $ce = if ($r.CertErrors) { "  [$($r.CertErrors)]" } else { '' }
+                Write-Host ("  {0,-17}{1,-$hostWidth} cert {2}, expires {3}{4}" -f '', '', $r.CertSubject, $r.CertExpires, $ce) -ForegroundColor DarkGray
+            }
+
+            # Results CSV row: the input row's own columns first, then the results
+            $out = [ordered]@{ Address = $t.Host }
+            if ($t.Row) { foreach ($c in $extraColumns) { $out[$c] = $t.Row.$c } }
+            foreach ($p in $r.PSObject.Properties) { $out[$p.Name] = $p.Value }
+            $byIndex[$j.Index] = [pscustomobject]$out
+        }
+    }
+}
+finally {
+    # Ctrl+C or an error: stop whatever is still running
+    foreach ($j in $jobs) { if (-not $j.Done) { try { $j.PS.Stop(); $j.PS.Dispose() } catch { } } }
+    $pool.Close()
+    $pool.Dispose()
+}
+$results = New-Object System.Collections.Generic.List[object]
+foreach ($o in $byIndex) { $results.Add($o) }
 
 # ---------------------------------------------------------- Summary
 Write-Host ""
