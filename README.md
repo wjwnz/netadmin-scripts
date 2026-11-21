@@ -12,6 +12,8 @@ usage, parameters and examples.
 | [`Imaging/Set-TryNextClosestSite.ps1`](Imaging/Set-TryNextClosestSite.ps1) | Task sequence step (WinPE, after Apply Operating System): turns on the Netlogon "Try Next Closest Site" policy in the new OS so the built-in domain join uses the nearest site with a writable DC. Recommended fix. |
 | [`Imaging/Join-DomainClosestDC.ps1`](Imaging/Join-DomainClosestDC.ps1) | Task sequence step (full OS, after Setup Windows and ConfigMgr): joins the domain against a named writable DC chosen from the machine's IPv4 address, with the join password read from a hidden task sequence variable. Fallback fix. |
 | [`GlobalProtect/GlobalProtect-Redirect-Test.ps1`](GlobalProtect/GlobalProtect-Redirect-Test.ps1) | Reads a CSV of IP addresses, connects to each over HTTPS (certificate errors ignored) and reports which ones redirect to the GlobalProtect login page `/global-protect/login.esp`. Saves a results CSV and a log. [`Example-Targets.csv`](GlobalProtect/Example-Targets.csv) shows the input format. |
+| [`ClaudeCode/install-claude-addons.sh`](ClaudeCode/install-claude-addons.sh) | Installs Claude Code plugins, skills and MCP servers on Ubuntu/Debian. `web` profile (build, test and design tools: safe for a machine with public-facing services) or `full` (adds research, social, office and media connectors). See [`ClaudeCode/README.md`](ClaudeCode/README.md) for the guide and troubleshooting. |
+| [`ClaudeCode/remove-claude-addons.sh`](ClaudeCode/remove-claude-addons.sh) | Trims a `full` install back to `web`: removes the connectors that hold sign-ins to outside accounts, plus caveman, Whisper and Ollama. |
 
 ## Adding a new script
 
